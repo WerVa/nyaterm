@@ -3283,6 +3283,7 @@
     "pausedCount": "%{count} paused",
     "pausedMembers": "Paused",
     "pruneMissing": "Clean up missing",
+    "receiveInput": "Send and receive synchronized input",
     "removeFiltered": "Remove",
     "resumeSelected": "Resume",
     "resumeSync": "Resume",
