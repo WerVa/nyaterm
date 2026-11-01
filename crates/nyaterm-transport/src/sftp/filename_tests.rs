@@ -28,6 +28,7 @@ pub(super) struct Files {
     pub(super) request_kinds: Vec<u8>,
     pub(super) directory_opens: Vec<Vec<u8>>,
     pub(super) request_delay: HashMap<u8, std::time::Duration>,
+    pub(super) request_delay_started: Option<std::sync::mpsc::Sender<u8>>,
     pub(super) modified: Option<u32>,
     pub(super) reads: Vec<(u64, usize)>,
     pub(super) read_paths: HashSet<Vec<u8>>,
@@ -450,6 +451,7 @@ fn service_with_config(
                     );
                     let is_read = packet[0] == 5;
                     let is_write = packet[0] == 6;
+                    let request_kind = packet[0];
                     if is_write {
                         let mut files = peer_files.lock().unwrap();
                         files.active_writes += 1;
@@ -494,6 +496,11 @@ fn service_with_config(
                             let _ = gate.acquire().await.map(|permit| permit.forget());
                         }
                         if !delay.is_zero() {
+                            // Signal only after this response has captured its delay;
+                            // clearing the fixture cannot unblock this request.
+                            if let Some(started) = &files.lock().unwrap().request_delay_started {
+                                let _ = started.send(request_kind);
+                            }
                             tokio::time::sleep(delay).await;
                         }
                         // The request stops being in flight once its answer is
