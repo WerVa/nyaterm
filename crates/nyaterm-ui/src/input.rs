@@ -7,8 +7,8 @@ use gpui::{
 use gpui_base::input::InputContextMenuCapabilities;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{
-    Copy, Cut, Editor, EditorState, Enter, Escape, Input, InputContentType, InputEvent, InputState,
-    Paste, SelectAll, Textarea, TextareaState,
+    Copy, Cut, Editor, EditorState, Enter, Escape, IndentInline, Input, InputContentType,
+    InputEvent, InputState, OutdentInline, Paste, SelectAll, Textarea, TextareaState,
 };
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Sizable, Size};
 
@@ -558,7 +558,8 @@ impl NyaInputState {
     fn ensure_component(&mut self, window: &mut Window, cx: &mut Context<Self>) -> ComponentState {
         if let Some(state) = self.state.clone() {
             if std::mem::take(&mut self.placeholder_pending) {
-                let placeholder = component_placeholder(self.placeholder.clone(), self.multi_line);
+                let placeholder =
+                    component_placeholder(self.placeholder.clone(), self.multi_line, self.code);
                 match &state {
                     ComponentState::Input(input) => {
                         input.update(cx, |input, cx| {
@@ -590,7 +591,7 @@ impl NyaInputState {
         let masked = self.masked;
         let multi_line = self.multi_line;
         self.placeholder_pending = false;
-        let placeholder = component_placeholder(self.placeholder.clone(), multi_line);
+        let placeholder = component_placeholder(self.placeholder.clone(), multi_line, self.code);
         let language = self.language.clone();
         // The shell supplies a definite height, including a resizable footer.
         // Kit 0.7.1 treats rows as a minimum and would force that viewport taller.
@@ -675,8 +676,9 @@ fn forward_input_event(
     }
 }
 
-fn component_placeholder(placeholder: SharedString, multi_line: bool) -> SharedString {
-    if !multi_line || (!placeholder.contains('\r') && !placeholder.contains('\n')) {
+fn component_placeholder(placeholder: SharedString, multi_line: bool, code: bool) -> SharedString {
+    // Code editors support separate placeholder lines alongside their line gutter.
+    if code || !multi_line || (!placeholder.contains('\r') && !placeholder.contains('\n')) {
         return placeholder;
     }
 
@@ -919,6 +921,7 @@ pub struct NyaInputShell {
     footer: Option<AnyElement>,
     on_key_down: Option<KeyDownHandler>,
     on_secondary_enter: Option<SecondaryEnterHandler>,
+    tab_navigation: bool,
     context_menu_labels: Option<[SharedString; 4]>,
     on_mask_toggle: Option<MaskToggleHandler>,
 }
@@ -938,6 +941,7 @@ impl NyaInputShell {
             footer: None,
             on_key_down: None,
             on_secondary_enter: None,
+            tab_navigation: false,
             context_menu_labels: None,
             on_mask_toggle: None,
         }
@@ -1020,6 +1024,12 @@ impl NyaInputShell {
         self.on_secondary_enter = Some(Box::new(handler));
         self
     }
+
+    /// Keep Tab/Shift+Tab as form navigation instead of code indentation.
+    pub fn tab_navigation(mut self) -> Self {
+        self.tab_navigation = true;
+        self
+    }
 }
 
 impl RenderOnce for NyaInputShell {
@@ -1037,6 +1047,7 @@ impl RenderOnce for NyaInputShell {
             footer,
             on_key_down,
             on_secondary_enter,
+            tab_navigation,
             context_menu_labels,
             on_mask_toggle,
         } = self;
@@ -1050,6 +1061,9 @@ impl RenderOnce for NyaInputShell {
         let capture_focus_state = state.clone();
         let gpui_context_menu = context_menu_labels.is_some();
         let focus_state = state.clone();
+        let enter_state = state.clone();
+        let tab_state = state.clone();
+        let shift_tab_state = state.clone();
         let debug_selector = id.to_string();
         let prefix_debug_selector = format!("{}-prefix", id);
         let has_footer = footer.is_some();
@@ -1174,9 +1188,28 @@ impl RenderOnce for NyaInputShell {
             container = container.capture_action(move |action: &Enter, window, cx| {
                 if action.secondary {
                     cx.stop_propagation();
-                    handler(window, cx);
+                    if enter_state.is_composing(window, cx) {
+                        enter_state.finish_composition(window, cx);
+                    } else {
+                        handler(window, cx);
+                    }
                 }
             });
+        }
+        if tab_navigation {
+            container = container
+                .capture_action(move |_: &IndentInline, window, cx| {
+                    cx.stop_propagation();
+                    if !tab_state.is_composing(window, cx) {
+                        window.focus_next(cx);
+                    }
+                })
+                .capture_action(move |_: &OutdentInline, window, cx| {
+                    cx.stop_propagation();
+                    if !shift_tab_state.is_composing(window, cx) {
+                        window.focus_prev(cx);
+                    }
+                });
         }
         let container = container.child(input);
         if let Some(labels) = context_menu_labels {
@@ -1941,6 +1974,150 @@ mod tests {
         );
     }
 
+    struct ScriptFormFixture {
+        previous: gpui::Entity<NyaInputState>,
+        script: gpui::Entity<NyaInputState>,
+        next: gpui::Entity<NyaInputState>,
+        saved: Rc<Cell<usize>>,
+    }
+
+    impl Render for ScriptFormFixture {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let saved = self.saved.clone();
+            div()
+                .w(px(500.))
+                .flex()
+                .flex_col()
+                .on_key_down(|event, window, cx| {
+                    if event.keystroke.key == "tab" {
+                        if event.keystroke.modifiers.shift {
+                            window.focus_prev(cx);
+                        } else {
+                            window.focus_next(cx);
+                        }
+                        cx.stop_propagation();
+                    }
+                })
+                .child(NyaInputShell::new("script-form-previous", &self.previous))
+                .child(
+                    NyaInputShell::new("script-form-editor", &self.script)
+                        .height(px(168.))
+                        .tab_navigation()
+                        .on_secondary_enter(move |_, _| saved.set(saved.get() + 1)),
+                )
+                .child(NyaInputShell::new("script-form-next", &self.next))
+        }
+    }
+
+    #[gpui::test]
+    fn script_form_keeps_top_alignment_pointer_selection_save_and_tab_navigation(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let saved = Rc::new(Cell::new(0));
+        let (fixture, cx) = cx.add_window_view(|_, cx| ScriptFormFixture {
+            previous: cx.new(|cx| NyaInputState::new(cx, "previous")),
+            script: cx.new(|cx| {
+                NyaInputState::new(cx, "echo first\necho second")
+                    .code(Some(4))
+                    .language("bash")
+            }),
+            next: cx.new(|cx| NyaInputState::new(cx, "next")),
+            saved: saved.clone(),
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| _ = window.draw(cx));
+        let (previous, script, next) = fixture.read_with(cx, |fixture, _| {
+            (
+                fixture.previous.clone(),
+                fixture.script.clone(),
+                fixture.next.clone(),
+            )
+        });
+        let component = cx.update(|_, cx| {
+            let Some(ComponentState::Editor(editor)) = script.read(cx).state.clone() else {
+                panic!("script fields must use the code editor");
+            };
+            editor
+        });
+        let [first, second] = cx.update(|_, cx| {
+            let editor = component.read(cx);
+            [2, 13].map(|offset| editor.range_to_bounds(&(offset..offset)).unwrap())
+        });
+        let shell = cx.debug_bounds("script-form-editor").unwrap();
+        assert_eq!(shell.size.height, px(168.));
+        assert!(first.top() - shell.top() < px(24.));
+        assert!(second.top() > first.top());
+        for (bounds, offset) in [(first, 2), (second, 13)] {
+            cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+            cx.run_until_parked();
+            cx.update(|_, cx| assert_eq!(component.read(cx).selected_range(), offset..offset));
+        }
+        cx.update(|window, cx| {
+            script.update(cx, |script, cx| script.focus_with_cursor_at_end(window, cx));
+        });
+        cx.simulate_keystrokes("enter shift-enter");
+        cx.run_until_parked();
+        let edited = script.read_with(cx, |script, cx| script.value(cx));
+        assert_eq!(edited, "echo first\necho second\n\n");
+        assert_eq!(saved.get(), 0);
+        let save_shortcut = if cfg!(target_os = "macos") {
+            "cmd-enter"
+        } else {
+            "ctrl-enter"
+        };
+        cx.simulate_keystrokes(save_shortcut);
+        cx.run_until_parked();
+        assert_eq!(saved.get(), 1);
+        assert_eq!(script.read_with(cx, |script, cx| script.value(cx)), edited);
+        cx.simulate_keystrokes("tab");
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            assert!(next.read(cx).component_focus_handle(cx).is_focused(window))
+        });
+        cx.simulate_keystrokes("shift-tab");
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            assert!(
+                script
+                    .read(cx)
+                    .component_focus_handle(cx)
+                    .is_focused(window)
+            )
+        });
+        cx.simulate_keystrokes("shift-tab");
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            assert!(
+                previous
+                    .read(cx)
+                    .component_focus_handle(cx)
+                    .is_focused(window)
+            );
+        });
+        cx.simulate_keystrokes("tab");
+        cx.run_until_parked();
+        assert_eq!(script.read_with(cx, |script, cx| script.value(cx)), edited);
+        cx.update(|window, cx| {
+            use gpui::EntityInputHandler as _;
+            component.update(cx, |editor, cx| {
+                editor.replace_and_mark_text_in_range(None, "拼", Some(0..1), window, cx)
+            });
+        });
+        cx.simulate_keystrokes(save_shortcut);
+        cx.run_until_parked();
+        assert_eq!(saved.get(), 1, "IME confirmation must not save the form");
+        assert!(
+            script
+                .read_with(cx, |script, cx| script.value(cx))
+                .ends_with('拼')
+        );
+    }
+
     #[test]
     fn value_tracks_seed_reset_and_clear_before_component_renders() {
         let mut cx = TestAppContext::single();
@@ -2021,15 +2198,25 @@ mod tests {
     }
 
     #[test]
+    fn code_placeholder_preserves_instruction_lines_and_literal_escapes() {
+        let text =
+            "例如：ls -la\n使用 {{变量名}} 注入动态参数。\n\\r 回车、\\n 换行、\\p 暂停 1 秒";
+        assert_eq!(
+            component_placeholder(text.into(), true, true).as_ref(),
+            text
+        );
+    }
+
+    #[test]
     fn multiline_placeholder_collapses_line_breaks() {
-        let placeholder = component_placeholder("first\nsecond".into(), true);
+        let placeholder = component_placeholder("first\nsecond".into(), true, false);
 
         assert_eq!(placeholder.as_ref(), "first second");
     }
 
     #[test]
     fn multiline_placeholder_collapses_crlf_and_blank_lines() {
-        let placeholder = component_placeholder("first\r\n\r\nsecond\n\nthird".into(), true);
+        let placeholder = component_placeholder("first\r\n\r\nsecond\n\nthird".into(), true, false);
 
         assert_eq!(placeholder.as_ref(), "first second third");
         assert!(!placeholder.contains('\r'));
@@ -2038,15 +2225,18 @@ mod tests {
 
     #[test]
     fn single_line_placeholder_is_preserved() {
-        let placeholder = component_placeholder("first\nsecond".into(), false);
+        let placeholder = component_placeholder("first\nsecond".into(), false, false);
 
         assert_eq!(placeholder.as_ref(), "first\nsecond");
     }
 
     #[test]
     fn multiline_placeholder_preserves_multibyte_text() {
-        let placeholder =
-            component_placeholder("例如：ls -la\n使用 {{变量名}} 注入动态参数。".into(), true);
+        let placeholder = component_placeholder(
+            "例如：ls -la\n使用 {{变量名}} 注入动态参数。".into(),
+            true,
+            false,
+        );
 
         assert_eq!(
             placeholder.as_ref(),

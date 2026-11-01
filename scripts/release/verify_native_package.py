@@ -18,6 +18,7 @@ from pathlib import Path, PurePosixPath
 
 import package_native
 import windows_msi
+import windows_portable
 
 
 MIN_ARTIFACT_SIZE = 1024
@@ -283,21 +284,25 @@ def read_rpm_member(path: Path, member: str) -> bytes:
 
 
 def verify_windows_portable(path: Path, target: str, version: str) -> None:
-    root = "NyaTerm-portable"
+    root = windows_portable.LAYOUT["root"]
     executables = ["NyaTerm.exe", *helper_filenames(target)]
     conpty_files = package_native.conpty_files(target)
-    required = {
-        f"{root}/{name}" for name in executables
-    } | {
-        f"{root}/nyaterm-portable",
-        f"{root}/LICENSE",
-        f"{root}/VERSION",
-        f"{root}/data/.keep",
-        f"{root}/conpty/LICENSE.txt",
-        *(f"{root}/conpty/{relative.as_posix()}" for relative in conpty_files),
-    }
+    required = windows_portable.archive_files(target)
     with zipfile.ZipFile(path) as archive:
         names = verify_zip_paths(archive)
+        seen = set()
+        directories = {str(parent) for name in required
+                       for parent in PurePosixPath(name).parents if str(parent) != "."}
+        for entry in archive.infolist():
+            name = entry.filename.rstrip("/")
+            if name.casefold() in seen:
+                raise RuntimeError(f"{path.name} contains a duplicate entry: {name}")
+            seen.add(name.casefold())
+            if (entry.external_attr >> 16) & 0o170000 == 0o120000:
+                raise RuntimeError(f"{path.name} contains a symbolic link: {name}")
+            allowed = directories if entry.is_dir() else required
+            if name not in allowed:
+                raise RuntimeError(f"{path.name} contains an unexpected entry: {name}")
         missing = required - names
         if missing:
             raise RuntimeError(f"{path.name} is missing: {', '.join(sorted(missing))}")

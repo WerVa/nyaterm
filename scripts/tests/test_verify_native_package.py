@@ -179,6 +179,20 @@ class VerifyNativePackageTests(unittest.TestCase):
                 path, "x86_64-pc-windows-msvc", "2.0.0"
             )
 
+    def test_windows_portable_rejects_unknown_duplicate_and_symlink_entries(self) -> None:
+        for name in ("unknown.exe", "NYATERM.EXE", "conpty/unknown.dll", "unknown/", "link"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "portable.zip"
+                write_portable(path, 0x8664, helper_machine=0x8664)
+                with zipfile.ZipFile(path, "a") as archive:
+                    info = zipfile.ZipInfo(f"NyaTerm-portable/{name}")
+                    if name == "link":
+                        info.create_system = 3
+                        info.external_attr = 0o120777 << 16
+                    archive.writestr(info, b"unexpected")
+                with self.assertRaises(RuntimeError):
+                    verify_native_package.verify_windows_portable(path, "x86_64-pc-windows-msvc", "2.0.0")
+
     def test_windows_portable_rejects_application_without_version_resource(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "portable.zip"

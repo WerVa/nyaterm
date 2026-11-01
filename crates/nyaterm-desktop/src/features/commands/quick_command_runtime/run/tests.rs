@@ -26,6 +26,7 @@ fn command_with_execution_mode(execution_mode: Option<&str>) -> QuickCommand {
         icon_tag: None,
         pinned: None,
         execution_mode: execution_mode.map(ToOwned::to_owned),
+        raw_send: None,
         source: None,
         risk_level: None,
         updated_at: None,
@@ -210,6 +211,71 @@ impl Drop for WireFixture {
             let _ = self.manager.close(id);
         }
     }
+}
+
+#[test]
+fn literal_quick_command_sends_exact_text_without_variables_or_pauses_in_both_execution_modes() {
+    let mut fixture = WireFixture::new(1);
+    for execute in [false, true] {
+        for ending in ["  ", "\r", "\n", "\r\n"] {
+            let text = format!("  {{{{变量}}}} \\r\\n\\t\\p\\\\ C:\\temp\n下一行{ending}");
+            fixture.cx.update_entity(&fixture.app, |app, cx| {
+                let mut command =
+                    command_with_execution_mode(Some(if execute { "execute" } else { "append" }));
+                command.command = text.clone();
+                command.raw_send = Some(true);
+                app.commands
+                    .replace_quick_command_catalog(vec![command], Vec::new());
+                app.apply_quick_command_by_id("command-1", false, cx);
+                assert!(app.commands.quick_variable_prompt().is_none());
+            });
+            fixture.cx.run_until_parked();
+            let mut expected = text.into_bytes();
+            if execute && ending == "  " {
+                expected.push(b'\r');
+            }
+            fixture.assert_wire(0, &expected);
+        }
+    }
+}
+
+#[test]
+fn literal_quick_command_broadcast_preserves_text_for_each_session() {
+    let mut fixture = WireFixture::new(2);
+    let text = "  {{host}} \\p C:\\temp\n下一行 ";
+    fixture.cx.update_entity(&fixture.app, |app, cx| {
+        let mut command = command_with_execution_mode(Some("append"));
+        command.command = text.into();
+        command.raw_send = Some(true);
+        app.commands
+            .replace_quick_command_catalog(vec![command], Vec::new());
+        app.apply_quick_command_by_id("command-1", true, cx);
+        assert!(app.commands.quick_variable_prompt().is_none());
+    });
+    fixture.cx.run_until_parked();
+    for index in 0..2 {
+        fixture.assert_wire(index, text.as_bytes());
+    }
+}
+
+#[test]
+fn disabling_literal_mode_restores_variable_prompts_and_escape_processing() {
+    let mut fixture = WireFixture::new(1);
+    fixture.cx.update_entity(&fixture.app, |app, cx| {
+        let mut command = command_with_execution_mode(Some("append"));
+        command.command = r"{{host}}\t\pnext".into();
+        command.raw_send = Some(false);
+        app.commands
+            .replace_quick_command_catalog(vec![command], Vec::new());
+        app.apply_quick_command_by_id("command-1", false, cx);
+        assert!(app.commands.quick_variable_prompt().is_some());
+        app.commands.set_quick_variable_value(0, "prod".into());
+        app.submit_quick_command_variable_prompt(cx);
+    });
+    fixture.cx.run_until_parked();
+    fixture.assert_wire(0, b"prod\t");
+    fixture.advance();
+    fixture.assert_wire(0, b"next");
 }
 
 #[test]

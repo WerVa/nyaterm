@@ -61,6 +61,16 @@ def staged_package(target: str):
 
 
 class PackageNativeTests(unittest.TestCase):
+    def test_portable_packages_match_shared_contract_for_both_architectures(self) -> None:
+        for target in ("x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"):
+            with self.subTest(target=target), staged_package(target) as (root, binary, info):
+                package_native.create_windows_packages(binary, info, "2.0.1", "2.0.1")
+                path = root / f"dist/NyaTerm_2.0.1_{info.label}_portable.zip"
+                with zipfile.ZipFile(path) as archive:
+                    actual = {entry.filename for entry in archive.infolist()
+                              if not entry.is_dir()}
+                self.assertEqual(actual, package_native.windows_portable.archive_files(target))
+
     @unittest.skipUnless(shutil.which("makensis"), "NSIS is not installed")
     def test_windows_installer_with_conpty_compiles_with_nsis(self) -> None:
         with staged_package("x86_64-pc-windows-msvc") as (root, binary, info):

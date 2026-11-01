@@ -781,7 +781,7 @@ impl ConnectionFeatureState {
                     .placeholder(placeholder);
                 match field {
                     ConnectionEditorField::Description => input.multi_line(Some(2)),
-                    ConnectionEditorField::PostLoginCommand => input.multi_line(Some(4)),
+                    ConnectionEditorField::PostLoginCommand => input.code(Some(4)).language("bash"),
                     _ => input,
                 }
             });

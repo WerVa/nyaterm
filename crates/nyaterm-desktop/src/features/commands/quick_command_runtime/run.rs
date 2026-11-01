@@ -6,11 +6,18 @@ use crate::features::NyaTermApp;
 use crate::features::commands::staged::StagedCommandHistory;
 use crate::models::QuickCommandVariablePromptState;
 
-use super::escapes::{QuickCommandChunk, plan_quick_command, quick_command_needs_staging};
+use super::escapes::{
+    QuickCommandChunk, plan_literal_quick_command, plan_quick_command, quick_command_needs_staging,
+};
 use super::helpers::{
     ai_command_card_category_name, unique_quick_command_category_id, validated_quick_command_text,
 };
 use super::variables::parse_quick_command_variables;
+
+struct QuickCommandSendPlan {
+    chunks: Vec<QuickCommandChunk>,
+    literal: bool,
+}
 
 struct StagedQuickCommandTarget {
     session_id: String,
@@ -100,6 +107,7 @@ impl NyaTermApp {
                         icon_tag: Some("terminal".to_string()),
                         pinned: Some(false),
                         execution_mode: Some("append".to_string()),
+                        raw_send: None,
                         source: Some("ai".to_string()),
                         risk_level: card.risk_level.clone(),
                         updated_at: None,
@@ -216,6 +224,20 @@ impl NyaTermApp {
             return;
         };
         let execute = quick_command_executes(&command);
+        if command.raw_send.unwrap_or_default() {
+            self.send_quick_command_plan(
+                command.id,
+                command.label,
+                QuickCommandSendPlan {
+                    chunks: plan_literal_quick_command(&command_text, execute),
+                    literal: true,
+                },
+                execute,
+                send_to_all,
+                cx,
+            );
+            return;
+        }
         let variables = parse_quick_command_variables(&command_text);
         if !variables.is_empty() {
             self.commands
@@ -254,7 +276,32 @@ impl NyaTermApp {
         // `\r \n \t \p \\` are interpreted here rather than at save time: the
         // stored script keeps the escapes, so what the panel shows is what the
         // user wrote.
-        let mut chunks = plan_quick_command(&command_text, execute);
+        self.send_quick_command_plan(
+            command_id,
+            label,
+            QuickCommandSendPlan {
+                chunks: plan_quick_command(&command_text, execute),
+                literal: false,
+            },
+            execute,
+            send_to_all,
+            cx,
+        );
+    }
+
+    fn send_quick_command_plan(
+        &mut self,
+        command_id: String,
+        label: String,
+        plan: QuickCommandSendPlan,
+        execute: bool,
+        send_to_all: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let QuickCommandSendPlan {
+            mut chunks,
+            literal,
+        } = plan;
         self.queue_quick_command_use_count(command_id);
 
         if quick_command_needs_staging(&chunks) {
@@ -288,7 +335,12 @@ impl NyaTermApp {
             let mut failed = 0usize;
             let mut ok_sessions = Vec::new();
             for session in sessions {
-                match self.write_session_input_recorded(&session.id, &command_bytes) {
+                let result = if literal {
+                    self.write_session_literal_input_recorded(&session.id, &command_bytes)
+                } else {
+                    self.write_session_input_recorded(&session.id, &command_bytes)
+                };
+                match result {
                     Ok(()) => {
                         sent += 1;
                         ok_sessions.push(session.id);
@@ -307,7 +359,12 @@ impl NyaTermApp {
             return;
         }
 
-        if self.send_terminal_input(command_bytes, cx) {
+        let sent = if literal {
+            self.send_terminal_literal_input(command_bytes, cx)
+        } else {
+            self.send_terminal_input(command_bytes, cx)
+        };
+        if sent {
             self.shell.set_status(if execute {
                 format!("ran quick command '{label}'")
             } else {

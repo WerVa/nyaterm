@@ -651,6 +651,14 @@ impl CommandFeatureState {
         true
     }
 
+    pub(in crate::features) fn toggle_quick_editor_raw_send(&mut self) -> bool {
+        let Some(editor) = self.quick.editor.draft.as_mut() else {
+            return false;
+        };
+        editor.raw_send = !editor.raw_send;
+        true
+    }
+
     pub(in crate::features) fn set_quick_editor_execution_mode(&mut self, mode: &str) -> bool {
         let Some(editor) = self.quick.editor.draft.as_mut() else {
             return false;
@@ -1177,6 +1185,7 @@ mod tests {
             icon_tag: None,
             pinned: None,
             execution_mode: None,
+            raw_send: None,
             source: None,
             risk_level: None,
             updated_at: None,
@@ -1360,6 +1369,27 @@ mod tests {
         assert!(state.close_quick_toolbar_popovers());
         assert!(!state.quick_ai_popover_is_open());
         assert!(!state.close_quick_toolbar_popovers());
+    }
+
+    #[test]
+    fn quick_editor_literal_mode_defaults_off_and_restores_the_saved_setting() {
+        let test_dir = TestConfigDir::new("nyaterm-command-state-test");
+        let mut state = command_state(test_dir.path());
+        assert!(!state.toggle_quick_editor_raw_send());
+        state.open_quick_editor(QuickCommandEditorState::blank());
+        assert!(!state.quick_editor().unwrap().raw_send);
+        assert!(state.toggle_quick_editor_raw_send());
+        assert!(state.quick_editor().unwrap().raw_send);
+        assert!(state.toggle_quick_editor_raw_send());
+        assert!(!state.quick_editor().unwrap().raw_send);
+
+        let mut saved = command("literal");
+        saved.raw_send = Some(true);
+        saved.command = "  {{变量}}\\p  ".into();
+        state.open_quick_editor(QuickCommandEditorState::from_command(saved.clone()));
+        assert!(state.quick_editor().unwrap().raw_send);
+        state.toggle_quick_editor_raw_send();
+        assert_eq!(state.quick_editor().unwrap().command, saved.command);
     }
 
     #[test]

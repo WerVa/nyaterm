@@ -792,6 +792,7 @@ fn quick_command(id: &str, category: Option<&str>, pinned: bool, order: i32) -> 
         icon_tag: None,
         pinned: pinned.then_some(true),
         execution_mode: None,
+        raw_send: None,
         source: None,
         risk_level: None,
         updated_at: None,
