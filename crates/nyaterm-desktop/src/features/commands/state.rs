@@ -91,6 +91,10 @@ impl CommandFeatureState {
         self.staged.cancel(session_id);
     }
 
+    pub(in crate::features) fn cancel_staged_sync_receiver(&mut self, session_id: &str) {
+        self.staged.cancel_receiver(session_id);
+    }
+
     pub(in crate::features) fn owns_staged_quick_command(&self, session_id: &str, id: u64) -> bool {
         self.staged.owns(session_id, id)
     }

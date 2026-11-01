@@ -278,3 +278,22 @@ fn first_monitoring_result_does_not_create_an_empty_portable_asset() {
             .is_none()
     );
 }
+
+#[test]
+fn login_monitoring_remains_local_and_does_not_affect_cloud_projection() {
+    let scope = SyncScope {
+        preferences: true,
+        ..Default::default()
+    };
+    let project = |enabled| {
+        project_entities(
+            &BTreeMap::from([(
+                "settings".into(),
+                json!({"ui":{"remote_stats_show_users":enabled}}).to_string(),
+            )]),
+            &scope,
+        )
+        .unwrap()
+    };
+    assert_eq!(project(false), project(true));
+}

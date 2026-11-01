@@ -81,6 +81,37 @@ pub struct DiskInfo {
     pub use_percent: u32,
 }
 
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct LoggedInUser {
+    pub name: String,
+    pub sessions: u32,
+}
+
+/// Whether the optional login-session probe produced a trustworthy result.
+#[derive(serde::Serialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum LoggedInUsersStatus {
+    #[default]
+    NotCollected,
+    Available,
+    Unavailable,
+    Failed,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteStatsOptions {
+    pub collect_logged_in_users: bool,
+}
+
+impl RemoteStatsOptions {
+    fn command(self) -> String {
+        // Only an internal boolean becomes a shell argument. No remote/user text.
+        format!(
+            "{SYSINFO_SCRIPT} nyaterm-stats {}",
+            u8::from(self.collect_logged_in_users)
+        )
+    }
+}
+
 #[derive(serde::Serialize, Debug, Default, Clone, PartialEq)]
 pub struct RemoteStats {
     pub system: SystemInfo,
@@ -90,6 +121,8 @@ pub struct RemoteStats {
     pub networks: Vec<NetworkInfo>,
     pub network_summary: NetworkSummaryInfo,
     pub disks: Vec<DiskInfo>,
+    pub users: Vec<LoggedInUser>,
+    pub users_status: LoggedInUsersStatus,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -327,6 +360,7 @@ fn usage_percent(delta: CpuDelta) -> f64 {
 pub const SYSINFO_SCRIPT: &str = r#"sh -c '
 LC_ALL=C
 export LC_ALL
+collect_users=${1:-0};
 
 base=${TMPDIR:-/tmp}/sysinfo.$$;
 hostf=$base.host;
@@ -335,6 +369,7 @@ cpucoref=$base.cpucores;
 diskf=$base.disk;
 diskraw=$base.diskraw;
 dfraw=$base.dfraw;
+whof=$base.who;
 
 trap "rm -f \"$base\".*" 0 HUP INT TERM;
 
@@ -503,6 +538,26 @@ fi;
 
 printf "MEMORY\t%s\t%s\t%s\n" "$mem_used" "$mem_avail" "$mem_cache";
 
+if [ "$collect_users" = 1 ]; then
+  if ! command -v who >/dev/null 2>&1; then
+    printf "USERS_STATUS\tunavailable\n";
+  elif run_limited "$whof" 1 who; then
+    if awk '"'"'
+NF && NF < 2 { invalid=1; next }
+NF { n[$1]++ }
+END {
+  if (invalid) { print "USERS_STATUS\tfailed"; exit }
+  print "USERS_STATUS\tavailable"
+  for (u in n) printf "USER\t%s\t%d\n", u, n[u]
+}
+'"'"' "$whof" 2>/dev/null; then :; else
+      printf "USERS_STATUS\tfailed\n";
+    fi;
+  else
+    printf "USERS_STATUS\tfailed\n";
+  fi;
+fi;
+
 if [ -r /proc/net/dev ]; then
   awk '"'"'
 NR>2 {
@@ -653,10 +708,19 @@ impl RemoteStatsService {
         sampler: &RemoteStatsSampler,
         session_id: &str,
     ) -> anyhow::Result<RemoteStats> {
+        self.snapshot_with_options(sampler, session_id, RemoteStatsOptions::default())
+    }
+
+    pub fn snapshot_with_options(
+        &self,
+        sampler: &RemoteStatsSampler,
+        session_id: &str,
+        options: RemoteStatsOptions,
+    ) -> anyhow::Result<RemoteStats> {
         if !self.config.remote_stats_enabled() {
             anyhow::bail!("remote stats are disabled for this SSH profile");
         }
-        let output = self.exec_success(SYSINFO_SCRIPT, "Failed to fetch stats")?;
+        let output = self.exec_success(&options.command(), "Failed to fetch stats")?;
         let parsed = parse_stats_output(&output.stdout)?;
         Ok(sampler.complete_snapshot(session_id, parsed))
     }
@@ -677,6 +741,8 @@ pub fn parse_stats_output(output: &str) -> anyhow::Result<ParsedRemoteStats> {
     let mut has_cpu_snapshot = false;
     let mut networks = BTreeMap::new();
     let mut seen_disk_mounts = HashSet::new();
+    let mut users = BTreeMap::<String, u32>::new();
+    let mut invalid_users = false;
 
     for line in output.lines() {
         let cols: Vec<&str> = line.split('\t').collect();
@@ -767,6 +833,33 @@ pub fn parse_stats_output(output: &str) -> anyhow::Result<ParsedRemoteStats> {
                 }
             }
 
+            "USERS_STATUS" => {
+                if stats.users_status != LoggedInUsersStatus::NotCollected {
+                    invalid_users = true;
+                }
+                stats.users_status = match cols.as_slice() {
+                    [_, "available"] => LoggedInUsersStatus::Available,
+                    [_, "unavailable"] => LoggedInUsersStatus::Unavailable,
+                    _ => LoggedInUsersStatus::Failed,
+                };
+            }
+            "USER" => {
+                let valid = (|| {
+                    if cols.len() != 3
+                        || cols[1].is_empty()
+                        || cols[1].chars().any(char::is_control)
+                        || !cols[2].bytes().all(|byte| byte.is_ascii_digit())
+                    {
+                        return None;
+                    }
+                    let count = cols[2].parse::<u32>().ok().filter(|count| *count > 0)?;
+                    let total = users.entry(cols[1].to_string()).or_default();
+                    *total = total.checked_add(count)?;
+                    Some(())
+                })();
+                invalid_users |= valid.is_none();
+            }
+
             "DISK" if cols.len() >= 6 && cols[1] != "-" => {
                 let mount = cols[2].trim();
 
@@ -789,6 +882,16 @@ pub fn parse_stats_output(output: &str) -> anyhow::Result<ParsedRemoteStats> {
         }
     }
 
+    if invalid_users || (!users.is_empty() && stats.users_status != LoggedInUsersStatus::Available)
+    {
+        stats.users_status = LoggedInUsersStatus::Failed;
+    }
+    if stats.users_status == LoggedInUsersStatus::Available {
+        stats.users = users
+            .into_iter()
+            .map(|(name, sessions)| LoggedInUser { name, sessions })
+            .collect();
+    }
     update_network_summary(&mut stats);
 
     Ok(ParsedRemoteStats {
@@ -958,6 +1061,195 @@ mod tests {
         assert_eq!(stats.disks[0].device, "/dev/sda1");
         assert_eq!(stats.disks[0].mount, "/");
         assert_eq!(stats.disks[1].mount, "/data");
+    }
+
+    #[test]
+    fn parse_stats_output_collects_logged_in_users_sorted_by_name() {
+        let stats = parse_stats_output(
+            "USERS_STATUS\tavailable\nUSER\troot\t1\nUSER\talice\t2\nUSER\talice\t1\n",
+        )
+        .unwrap()
+        .stats;
+
+        assert_eq!(
+            stats
+                .users
+                .iter()
+                .map(|user| (user.name.as_str(), user.sessions))
+                .collect::<Vec<_>>(),
+            [("alice", 3), ("root", 1)]
+        );
+        assert!(SYSINFO_SCRIPT.contains("run_limited \"$whof\" 1 who"));
+    }
+
+    #[test]
+    fn invalid_login_records_do_not_break_other_resource_readings() {
+        use super::LoggedInUsersStatus;
+        for records in [
+            "USER\talice\tnot-a-number",
+            "USER\talice\t0",
+            "USER\talice\t+1",
+            "USER\talice\t 1",
+            "USER\t\t2",
+            "USER\talice\t4294967295\nUSER\talice\t1",
+            "USER\talice\t1\textra",
+            "USERS_STATUS\tavailable",
+            "USER\talice\t2\nUSERS_STATUS\tfailed",
+        ] {
+            let parsed = parse_stats_output(&format!("USERS_STATUS\tavailable\n{records}\nMEMORY\t1\t2\t3\nSYSTEM\thost\t10\tLinux\tx86_64\n")).unwrap().stats;
+            assert_eq!(
+                parsed.users_status,
+                LoggedInUsersStatus::Failed,
+                "{records}"
+            );
+            assert!(parsed.users.is_empty());
+            assert_eq!(parsed.memory.available, 2);
+            assert_eq!(parsed.system.hostname, "host");
+        }
+        let empty = parse_stats_output("USERS_STATUS\tavailable\n")
+            .unwrap()
+            .stats;
+        assert_eq!(empty.users_status, LoggedInUsersStatus::Available);
+        assert!(empty.users.is_empty());
+        assert_eq!(
+            parse_stats_output("").unwrap().stats.users_status,
+            LoggedInUsersStatus::NotCollected
+        );
+    }
+
+    /// Executes the actual remote script with an isolated PATH. Fixtures can
+    /// replace who or omit it entirely without depending on the host's utmp.
+    #[test]
+    fn login_probe_is_opt_in_and_missing_failing_or_slow_who_preserves_stats() {
+        use super::{LoggedInUsersStatus, RemoteStatsOptions};
+        use std::path::{Path, PathBuf};
+        use std::process::Command;
+
+        fn script(path: &Path, body: &str) {
+            std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+        }
+        let shell = std::env::var_os("NYATERM_TEST_SH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                if cfg!(windows) {
+                    let output = Command::new("git").arg("--exec-path").output().unwrap();
+                    assert!(output.status.success());
+                    PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
+                        .ancestors()
+                        .nth(3)
+                        .unwrap()
+                        .join("usr/bin/sh.exe")
+                } else {
+                    PathBuf::from("/bin/sh")
+                }
+            });
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        for utility in [
+            "sh", "uname", "awk", "rm", "mv", "sleep", "df", "tr", "cat", "getconf",
+        ] {
+            let output = Command::new(&shell)
+                .env(
+                    "PATH",
+                    if cfg!(windows) {
+                        shell.parent().unwrap().as_os_str().to_os_string()
+                    } else {
+                        std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into())
+                    },
+                )
+                .args(["-c", "command -v \"$1\"", "probe", utility])
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "missing test utility {utility}");
+            let executable = String::from_utf8(output.stdout).unwrap();
+            script(
+                &bin.join(utility),
+                &format!(
+                    "exec '{}' \"$@\"",
+                    executable.trim().replace('\'', "'\"'\"'")
+                ),
+            );
+        }
+        let who = bin.join("who");
+        let marker = dir.path().join("calls");
+        let cases = [
+            (
+                false,
+                Some("printf 'root pts/0\\nalice pts/1\\nalice pts/2\\n'"),
+                LoggedInUsersStatus::NotCollected,
+                0,
+            ),
+            (
+                true,
+                Some("printf 'root pts/0\\nalice pts/1\\nalice pts/2\\n'"),
+                LoggedInUsersStatus::Available,
+                2,
+            ),
+            (true, Some(":"), LoggedInUsersStatus::Available, 0),
+            (true, None, LoggedInUsersStatus::Unavailable, 0),
+            (true, Some("exit 1"), LoggedInUsersStatus::Failed, 0),
+            (
+                true,
+                Some("printf 'malformed\\n'"),
+                LoggedInUsersStatus::Failed,
+                0,
+            ),
+            (true, Some("exec sleep 3"), LoggedInUsersStatus::Failed, 0),
+        ];
+        for (enabled, body, status, accounts) in cases {
+            let _ = std::fs::remove_file(&who);
+            let _ = std::fs::remove_file(&marker);
+            if let Some(body) = body {
+                script(
+                    &who,
+                    &format!("printf called >\"$NYATERM_WHO_CALLS\"\n{body}"),
+                );
+            }
+            let output = Command::new(&shell)
+                .args([
+                    "-c",
+                    &RemoteStatsOptions {
+                        collect_logged_in_users: enabled,
+                    }
+                    .command(),
+                ])
+                .env("PATH", &bin)
+                .env("TMPDIR", dir.path())
+                .env("NYATERM_WHO_CALLS", &marker)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let text = String::from_utf8(output.stdout).unwrap();
+            let stats = parse_stats_output(&text).unwrap().stats;
+            assert_eq!(stats.users_status, status, "{text}");
+            assert_eq!(stats.users.len(), accounts);
+            assert!(
+                text.contains("SYSTEM\t") && text.contains("MEMORY\t") && text.contains("CPU\t")
+            );
+            assert_eq!(marker.exists(), enabled && body.is_some());
+            if accounts > 0 {
+                assert_eq!(stats.users[0].name, "alice");
+                assert_eq!(stats.users[0].sessions, 2);
+                assert_eq!(stats.users[1].name, "root");
+            }
+            assert!(!std::fs::read_dir(dir.path()).unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("sysinfo.")
+            }));
+        }
     }
 
     #[test]

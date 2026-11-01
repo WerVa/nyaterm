@@ -220,9 +220,10 @@ use ssh_shell_integration::{
     detect_ssh_shell_type,
 };
 pub use stats::{
-    CpuCoreUsage, CpuInfo, CpuUsageSource, DiskInfo, LoadInfo, MemoryInfo, NetworkInfo,
-    NetworkSummaryInfo, ParsedRemoteStats, RemoteStats, RemoteStatsSampler, RemoteStatsService,
-    SYSINFO_SCRIPT, SystemInfo, parse_stats_output,
+    CpuCoreUsage, CpuInfo, CpuUsageSource, DiskInfo, LoadInfo, LoggedInUser, LoggedInUsersStatus,
+    MemoryInfo, NetworkInfo, NetworkSummaryInfo, ParsedRemoteStats, RemoteStats,
+    RemoteStatsOptions, RemoteStatsSampler, RemoteStatsService, SYSINFO_SCRIPT, SystemInfo,
+    parse_stats_output,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
