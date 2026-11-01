@@ -20,9 +20,9 @@ use crate::models::{
     TerminalFrameSearchEvent, TerminalFrameSearchKey, TerminalFrameSearchPurpose,
     TerminalFrameSnapshotEvent, TerminalFrameSnapshotPurpose, TerminalPresentation,
     TerminalSearchMode, TerminalViewState, TerminalWindowNode, TerminalWorkPolicy,
-    WorkspacePaneNode, append_terminal_ui_output_tail, terminal_action_link_matcher_key,
-    terminal_frame_scroll_window_extra_rows, terminal_frame_search_result_is_current,
-    terminal_geometry_diagnostics_enabled, terminal_snapshot_matches_grid_geometry,
+    WorkspacePaneNode, terminal_action_link_matcher_key, terminal_frame_scroll_window_extra_rows,
+    terminal_frame_search_result_is_current, terminal_geometry_diagnostics_enabled,
+    terminal_snapshot_matches_grid_geometry,
 };
 
 use super::view_io::terminal_visual_display_offset;
@@ -1019,6 +1019,7 @@ impl NyaTermApp {
                     // Priority lag: visible surface without a snapshot yet — keep
                     // protocol/revision current and request a live snapshot.
                     view.apply_terminal_background_frame_parts(
+                        &visible_text,
                         None,
                         None,
                         protocol_state,
@@ -1030,9 +1031,6 @@ impl NyaTermApp {
                             view.output_burst_bytes.saturating_add(accepted_bytes);
                         view.enter_render_degraded_mode();
                     }
-                    if !visible_text.is_empty() && !view.render_degraded {
-                        append_terminal_ui_output_tail(&mut view.output, &visible_text);
-                    }
                     if view.scroll_offset > 0 {
                         view.has_new_while_scrolled = true;
                     }
@@ -1042,6 +1040,7 @@ impl NyaTermApp {
                 let retain = keep_hidden_snapshot.then_some(snapshot).flatten();
                 shell_edit_snapshot_available = retain.is_some();
                 view.apply_terminal_background_frame_parts(
+                    &visible_text,
                     retain,
                     if keep_hidden_snapshot {
                         action_links

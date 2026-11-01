@@ -342,6 +342,7 @@ fn apply_output_frame_to_view(view: &mut TerminalViewState, frame: TerminalFrame
     } = frame;
     let Some(snapshot) = snapshot else {
         view.apply_terminal_background_frame_parts(
+            &visible_text,
             None,
             None,
             protocol_state,
@@ -996,12 +997,23 @@ fn terminal_frame_large_accepted_output_does_not_show_protection_overlay() {
 }
 
 #[test]
-fn terminal_background_frame_apply_skips_render_work() {
+fn terminal_degraded_frame_apply_keeps_output_tail() {
+    let mut view = TerminalViewState::new();
+    view.render_degraded = true;
+
+    apply_output_frame_to_view(&mut view, output_frame_with_sizes(1, 0));
+
+    assert_eq!(view.output, "x");
+}
+
+#[test]
+fn terminal_background_frame_apply_skips_render_work_but_keeps_output_tail() {
     let mut view = TerminalViewState::new();
     view.render_degraded = false;
     let frame = output_frame_with_sizes((32 * 1024) + 1, 0);
 
     view.apply_terminal_background_frame_parts(
+        &frame.visible_text,
         frame.snapshot.clone(),
         frame.action_links.clone(),
         frame.protocol_state,
@@ -1009,7 +1021,8 @@ fn terminal_background_frame_apply_skips_render_work() {
         frame.revision,
     );
 
-    assert_eq!(view.output, "");
+    // AI context and MCP read this tail for sessions that are not on screen.
+    assert_eq!(view.output, "x");
     assert_eq!(view.screen_revision, frame.revision);
     assert!(view.frame_snapshot.is_some());
     assert_eq!(view.output_burst_bytes, 0);
@@ -4019,7 +4032,14 @@ fn hidden_session_keeps_history_anchor_when_releasing_its_snapshot() {
     view.apply_terminal_live_snapshot_frame(Arc::new(worker.snapshot()), None, 1);
     view.scroll_offset = 3;
     let baseline = view.history_state();
-    view.apply_terminal_background_frame_parts(None, None, TerminalProtocolState::default(), 0, 2);
+    view.apply_terminal_background_frame_parts(
+        "",
+        None,
+        None,
+        TerminalProtocolState::default(),
+        0,
+        2,
+    );
     assert!(view.frame_snapshot.is_none());
     assert_eq!(view.history_state(), baseline);
     worker.advance(b"12\r\n13\r\n");
