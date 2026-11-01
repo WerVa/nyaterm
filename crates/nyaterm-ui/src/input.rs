@@ -558,7 +558,8 @@ impl NyaInputState {
     fn ensure_component(&mut self, window: &mut Window, cx: &mut Context<Self>) -> ComponentState {
         if let Some(state) = self.state.clone() {
             if std::mem::take(&mut self.placeholder_pending) {
-                let placeholder = component_placeholder(self.placeholder.clone(), self.multi_line);
+                let placeholder =
+                    component_placeholder(self.placeholder.clone(), self.multi_line, self.code);
                 match &state {
                     ComponentState::Input(input) => {
                         input.update(cx, |input, cx| {
@@ -590,7 +591,7 @@ impl NyaInputState {
         let masked = self.masked;
         let multi_line = self.multi_line;
         self.placeholder_pending = false;
-        let placeholder = component_placeholder(self.placeholder.clone(), multi_line);
+        let placeholder = component_placeholder(self.placeholder.clone(), multi_line, self.code);
         let language = self.language.clone();
         // The shell supplies a definite height, including a resizable footer.
         // Kit 0.7.1 treats rows as a minimum and would force that viewport taller.
@@ -675,8 +676,9 @@ fn forward_input_event(
     }
 }
 
-fn component_placeholder(placeholder: SharedString, multi_line: bool) -> SharedString {
-    if !multi_line || (!placeholder.contains('\r') && !placeholder.contains('\n')) {
+fn component_placeholder(placeholder: SharedString, multi_line: bool, code: bool) -> SharedString {
+    // Code editors support separate placeholder lines alongside their line gutter.
+    if code || !multi_line || (!placeholder.contains('\r') && !placeholder.contains('\n')) {
         return placeholder;
     }
 
@@ -2021,15 +2023,25 @@ mod tests {
     }
 
     #[test]
+    fn code_placeholder_preserves_instruction_lines_and_literal_escapes() {
+        let text =
+            "例如：ls -la\n使用 {{变量名}} 注入动态参数。\n\\r 回车、\\n 换行、\\p 暂停 1 秒";
+        assert_eq!(
+            component_placeholder(text.into(), true, true).as_ref(),
+            text
+        );
+    }
+
+    #[test]
     fn multiline_placeholder_collapses_line_breaks() {
-        let placeholder = component_placeholder("first\nsecond".into(), true);
+        let placeholder = component_placeholder("first\nsecond".into(), true, false);
 
         assert_eq!(placeholder.as_ref(), "first second");
     }
 
     #[test]
     fn multiline_placeholder_collapses_crlf_and_blank_lines() {
-        let placeholder = component_placeholder("first\r\n\r\nsecond\n\nthird".into(), true);
+        let placeholder = component_placeholder("first\r\n\r\nsecond\n\nthird".into(), true, false);
 
         assert_eq!(placeholder.as_ref(), "first second third");
         assert!(!placeholder.contains('\r'));
@@ -2038,15 +2050,18 @@ mod tests {
 
     #[test]
     fn single_line_placeholder_is_preserved() {
-        let placeholder = component_placeholder("first\nsecond".into(), false);
+        let placeholder = component_placeholder("first\nsecond".into(), false, false);
 
         assert_eq!(placeholder.as_ref(), "first\nsecond");
     }
 
     #[test]
     fn multiline_placeholder_preserves_multibyte_text() {
-        let placeholder =
-            component_placeholder("例如：ls -la\n使用 {{变量名}} 注入动态参数。".into(), true);
+        let placeholder = component_placeholder(
+            "例如：ls -la\n使用 {{变量名}} 注入动态参数。".into(),
+            true,
+            false,
+        );
 
         assert_eq!(
             placeholder.as_ref(),

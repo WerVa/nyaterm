@@ -7,6 +7,44 @@ use super::sources::{
 };
 
 #[test]
+fn literal_json_export_import_preserves_mode_and_exact_command_text() {
+    let mut config = QuickCommandsConfig::default();
+    let text = "  {{变量}} C:\\temp\\r\\n\\t\\p\\\\\n下一行  ";
+    let raw = serde_json::json!({"commands": [
+        {"id":"literal", "label":"Literal", "command":text, "raw_send":true, "execution_mode":"append"},
+        {"id":"legacy", "label":"Legacy", "command":"pwd"},
+        {"id":"null", "label":"Null", "command":"pwd", "raw_send":null},
+        {"id":"off", "label":"Off", "command":"pwd", "raw_send":false}
+    ]}).to_string();
+    merge_import(&mut config, parse_nyaterm_import(&raw).unwrap()).unwrap();
+    assert_eq!(config.commands[0].command, text);
+    assert_eq!(config.commands[0].raw_send, Some(true));
+    assert_eq!(config.commands[0].execution_mode.as_deref(), Some("append"));
+    assert!(
+        config.commands[1..]
+            .iter()
+            .all(|command| !command.raw_send.unwrap_or_default())
+    );
+
+    let exported =
+        nyaterm_core::models::quick_commands::export_quick_commands_json(config).unwrap();
+    let mut restored = QuickCommandsConfig::default();
+    merge_import(&mut restored, parse_nyaterm_import(&exported).unwrap()).unwrap();
+    assert_eq!(restored.commands[0].command, text);
+    assert_eq!(restored.commands[0].raw_send, Some(true));
+}
+
+#[test]
+fn literal_json_import_rejects_invalid_switch_types_and_blank_commands() {
+    assert!(
+        parse_nyaterm_import(r#"[{"label":"Bad","command":"pwd","raw_send":"true"}]"#).is_err()
+    );
+    let import =
+        parse_nyaterm_import(r#"[{"label":"Blank","command":" \n ","raw_send":true}]"#).unwrap();
+    assert!(merge_import(&mut QuickCommandsConfig::default(), import).is_err());
+}
+
+#[test]
 fn imports_config_and_array_shapes() {
     let config = parse_nyaterm_import(
         r#"{"categories":[{"id":"ops","name":"Ops"}],"commands":[{"id":"c1","label":"List","command":"ls","category_id":"ops"}]}"#,

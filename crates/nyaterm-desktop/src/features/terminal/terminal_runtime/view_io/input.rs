@@ -116,6 +116,24 @@ impl NyaTermApp {
         track_suggestions: bool,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.send_terminal_input_with_delivery(bytes, track_suggestions, false, cx)
+    }
+
+    pub(in crate::features) fn send_terminal_literal_input(
+        &mut self,
+        bytes: Vec<u8>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.send_terminal_input_with_delivery(bytes, true, true, cx)
+    }
+
+    fn send_terminal_input_with_delivery(
+        &mut self,
+        bytes: Vec<u8>,
+        track_suggestions: bool,
+        literal: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let input_started_at = Instant::now();
         if bytes.is_empty() || self.active_terminal_input_blocked() {
             return false;
@@ -161,7 +179,12 @@ impl NyaTermApp {
         // pending Enter submission is applied to every successful peer.
         let mut ok_sessions = Vec::new();
         let write_started_at = Instant::now();
-        match self.write_session_input_recorded(&session_id, &bytes) {
+        let result = if literal {
+            self.write_session_literal_input_recorded(&session_id, &bytes)
+        } else {
+            self.write_session_input_recorded(&session_id, &bytes)
+        };
+        match result {
             Ok(()) => ok_sessions.push(session_id),
             Err(error) => {
                 if self.set_terminal_status_if_changed(format!("input failed: {error}")) {
@@ -174,7 +197,12 @@ impl NyaTermApp {
         let mut synced = 0usize;
         let mut failed = 0usize;
         for peer_id in peers {
-            match self.write_session_input_recorded(&peer_id, &bytes) {
+            let result = if literal {
+                self.write_session_literal_input_recorded(&peer_id, &bytes)
+            } else {
+                self.write_session_input_recorded(&peer_id, &bytes)
+            };
+            match result {
                 Ok(()) => {
                     ok_sessions.push(peer_id);
                     synced += 1;
@@ -895,6 +923,20 @@ impl NyaTermApp {
         }
         self.commands.cancel_staged_quick_command(session_id);
         self.write_guarded_terminal_input(session_id, bytes)
+    }
+
+    /// Literal text still uses the session charset, but bypasses transport text
+    /// rewriting (notably Telnet Enter-mode newline normalization).
+    pub(in crate::features) fn write_session_literal_input_recorded(
+        &mut self,
+        session_id: &str,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        if let Some(state) = self.terminal.editing.sessions.get_mut(session_id) {
+            state.suggestion_fill = None;
+        }
+        let encoded = self.encode_session_outgoing(session_id, bytes)?;
+        self.write_session_raw_input_recorded(session_id, &encoded)
     }
 
     /// Only the current script owner may bypass cancellation by competing input.
