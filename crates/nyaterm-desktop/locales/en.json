@@ -2064,7 +2064,14 @@
     "uptime": "Uptime",
     "usagePercent": "Usage",
     "used": "Used",
-    "users": "Users"
+    "users": "Users",
+    "loginSessions": "Login sessions",
+    "usersSummary": "%{accounts} login accounts · %{sessions} login sessions",
+    "usersPending": "Not collected yet",
+    "usersUnavailable": "The who command is unavailable",
+    "usersFailed": "Login session collection failed or timed out",
+    "usersEmpty": "No recorded login sessions",
+    "usersMeaning": "System-recorded login sessions; not every SSH connection."
   },
   "savedConnections": {
     "sessionImportTitle": "Import sessions",
@@ -2909,7 +2916,7 @@
     "remoteStatsInterval": "Stats Interval (s)",
     "remoteStatsIntervalDesc": "Default: 3 s",
     "remoteStatsShowUsers": "Show logged-in users",
-    "remoteStatsShowUsersDesc": "List the accounts reported by who, with their session count, in the resource monitor and the Host overview header.",
+    "remoteStatsShowUsersDesc": "Collect system-recorded login sessions in the resource monitor System card.",
     "removeBackgroundImage": "Remove Image",
     "resumeBrokenTransfer": "Resume Transfers",
     "resumeBrokenTransferDesc": "Resume incomplete transfers instead of restarting.",

@@ -8194,3 +8194,26 @@ fn cloud_sync_rotated_credentials_survive_restart_and_reject_stale_accounts() {
         );
     }
 }
+
+#[test]
+fn login_monitoring_setting_roundtrips_without_losing_unknown_fields() {
+    let dir = unique_temp_dir("login-monitoring-settings");
+    let store = ConnectionStore::open(&dir).unwrap();
+    store.save_settings_value(&serde_json::json!({"ui":{"future_monitor_option":{"keep":true}},"future":{"version":99}})).unwrap();
+    let mut settings = store.load_app_settings_summary().unwrap();
+    assert!(!settings.ui_remote_stats_show_users);
+    for enabled in [true, false] {
+        settings.ui_remote_stats_show_users = enabled;
+        store.save_terminal_settings(&settings).unwrap();
+        assert_eq!(
+            store
+                .load_app_settings_summary()
+                .unwrap()
+                .ui_remote_stats_show_users,
+            enabled
+        );
+        let raw = store.load_settings_value().unwrap();
+        assert_eq!(raw["ui"]["future_monitor_option"]["keep"], true);
+        assert_eq!(raw["future"]["version"], 99);
+    }
+}

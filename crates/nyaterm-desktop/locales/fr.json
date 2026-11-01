@@ -2071,7 +2071,14 @@
     "uptime": "Temps de fonctionnement",
     "usagePercent": "Utilisation",
     "used": "Utilisé",
-    "users": "Utilisateurs"
+    "users": "Utilisateurs",
+    "loginSessions": "Sessions de connexion",
+    "usersSummary": "%{accounts} comptes · %{sessions} sessions de connexion",
+    "usersPending": "Pas encore collecté",
+    "usersUnavailable": "La commande who est indisponible",
+    "usersFailed": "Échec ou expiration de la collecte des sessions",
+    "usersEmpty": "Aucune session de connexion enregistrée",
+    "usersMeaning": "Sessions enregistrées par le système, pas toutes les connexions SSH."
   },
   "savedConnections": {
     "sessionImportTitle": "Importer des sessions",
@@ -2916,7 +2923,7 @@
     "remoteStatsInterval": "Intervalle des statistiques (s)",
     "remoteStatsIntervalDesc": "Par défaut : 3 s",
     "remoteStatsShowUsers": "Afficher les utilisateurs connectés",
-    "remoteStatsShowUsersDesc": "Liste les comptes signalés par who, avec leur nombre de sessions, dans le moniteur de ressources et l'en-tête Vue d'ensemble de l'hôte.",
+    "remoteStatsShowUsersDesc": "Collecter les sessions de connexion dans la carte Système du moniteur de ressources.",
     "removeBackgroundImage": "Retirer l'image",
     "resumeBrokenTransfer": "Reprendre les transferts",
     "resumeBrokenTransferDesc": "Reprendre les transferts incomplets au lieu de les redémarrer.",

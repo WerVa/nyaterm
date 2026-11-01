@@ -2064,7 +2064,14 @@
     "uptime": "运行时长",
     "usagePercent": "使用占比",
     "used": "已使用",
-    "users": "登录用户"
+    "users": "登录用户",
+    "loginSessions": "登录会话",
+    "usersSummary": "%{accounts} 个登录账户 · %{sessions} 条登录会话",
+    "usersPending": "尚未采集",
+    "usersUnavailable": "远程环境没有 who 命令",
+    "usersFailed": "登录会话采集失败或超时",
+    "usersEmpty": "没有登录会话记录",
+    "usersMeaning": "系统记录的登录会话，不代表所有 SSH 连接。"
   },
   "savedConnections": {
     "sessionImportTitle": "导入会话",
@@ -2909,7 +2916,7 @@
     "remoteStatsInterval": "资源采集间隔（秒）",
     "remoteStatsIntervalDesc": "默认 3 秒",
     "remoteStatsShowUsers": "显示登录用户",
-    "remoteStatsShowUsersDesc": "在资源监控和主机概览标题栏中显示 who 报告的账户及其会话数。",
+    "remoteStatsShowUsersDesc": "在资源监控的系统卡片中采集并显示系统记录的登录会话。",
     "removeBackgroundImage": "移除图片",
     "resumeBrokenTransfer": "断点续传",
     "resumeBrokenTransferDesc": "尝试恢复未完成的文件传输而非重新开始。",

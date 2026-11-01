@@ -1192,6 +1192,21 @@ mod tests {
     }
 
     #[test]
+    fn login_monitoring_is_opt_in_for_legacy_settings_and_roundtrips() {
+        let mut value = serde_json::to_value(AppSettingsSummary::default()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("ui_remote_stats_show_users");
+        let mut summary: AppSettingsSummary = serde_json::from_value(value).unwrap();
+        assert!(!summary.ui_remote_stats_show_users);
+        summary.ui_remote_stats_show_users = true;
+        let restored: AppSettingsSummary =
+            serde_json::from_str(&serde_json::to_string(&summary).unwrap()).unwrap();
+        assert!(restored.ui_remote_stats_show_users);
+    }
+
+    #[test]
     fn summary_default_start_workspace_and_asset_sort() {
         let summary = AppSettingsSummary::default();
         assert_eq!(summary.ui_quick_cmd_selected_category, "all");

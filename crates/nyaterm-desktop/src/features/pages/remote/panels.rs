@@ -996,6 +996,7 @@ mod tests {
                     .begin_stats_job("remote-panel-test".to_string(), false);
                 app.remote_ops.apply_stats_event(
                     StatsJobResult {
+                        users_revision: 0,
                         job_id: ticket.job_id,
                         session_id: "remote-panel-test".to_string(),
                         result: Ok(stats(true)),
@@ -1048,6 +1049,7 @@ mod tests {
                     .begin_stats_job("remote-panel-test".to_string(), false);
                 app.remote_ops.apply_stats_event(
                     StatsJobResult {
+                        users_revision: 0,
                         job_id: ticket.job_id,
                         session_id: "remote-panel-test".to_string(),
                         result: Ok(stats(false)),

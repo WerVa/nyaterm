@@ -9,12 +9,14 @@ use nyaterm_transport::{
     CpuCoreUsage, RemoteGpu, RemoteGpuOverview, RemoteGpuProcess, RemoteNpu, RemoteNpuOverview,
     RemoteNpuProcess,
 };
-use nyaterm_ui::{NyaScrollable, NyaTooltip};
+use nyaterm_ui::{
+    NyaButton, NyaButtonVariant, NyaPopover, NyaPopoverAlign, NyaPopoverPlacement, NyaScrollable,
+    NyaTooltip,
+};
 
 use std::sync::Arc;
 
 use super::panels::{PanelChrome, RemoteMonitorKind, RemoteMonitorPanel};
-use crate::features::formatting::format_logged_in_users;
 use crate::features::remote::StatsPresentationState;
 use crate::features::remote::{
     ACCELERATOR_PROCESS_VIEWPORT_ROWS, GpuPresentationState, NpuPresentationState, max_list_offset,
@@ -151,10 +153,11 @@ pub(in crate::features::pages::remote) fn stats_panel(
                 .flex()
                 .flex_col()
                 .gap_2()
-                    .child(resource_section_card(
+                    .child(resource_section_card_with_action(
                         palette,
                         "icons/conn/server.svg",
                         system_label,
+                        show_users.then(|| login_users_action(stats, palette)),
                         div()
                             .grid()
                             .grid_cols(2)
@@ -185,21 +188,7 @@ pub(in crate::features::pages::remote) fn stats_panel(
                                     format_resource_uptime(stats.system.uptime_sec),
                                 )
                                 .text_right(),
-                            )
-                            .when(show_users, |this| {
-                                this.child(
-                                    resource_info_cell(
-                                        palette,
-                                        t!("resourceMonitor.users").to_string(),
-                                        if stats.users.is_empty() {
-                                            "-".to_string()
-                                        } else {
-                                            format_logged_in_users(&stats.users)
-                                        },
-                                    )
-                                    .col_span(2),
-                                )
-                            }),
+                            ),
                     ))
                     .child(resource_section_card(
                         palette,
@@ -1637,6 +1626,113 @@ fn format_optional_percent_decimal(value: Option<f64>) -> String {
         .map(|value| format!("{:.1}%", value.clamp(0., 100.)))
         .unwrap_or_else(|| "--".to_string())
 }
+fn login_users_action(
+    stats: &nyaterm_transport::RemoteStats,
+    palette: crate::theme::ThemePalette,
+) -> gpui::AnyElement {
+    use nyaterm_transport::LoggedInUsersStatus;
+    let available = stats.users_status == LoggedInUsersStatus::Available;
+    let summary = if available {
+        t!(
+            "resourceMonitor.usersSummary",
+            accounts = stats.users.len(),
+            sessions = stats
+                .users
+                .iter()
+                .map(|user| u64::from(user.sessions))
+                .sum::<u64>()
+        )
+        .to_string()
+    } else {
+        match stats.users_status {
+            LoggedInUsersStatus::NotCollected => t!("resourceMonitor.usersPending"),
+            LoggedInUsersStatus::Unavailable => t!("resourceMonitor.usersUnavailable"),
+            _ => t!("resourceMonitor.usersFailed"),
+        }
+        .to_string()
+    };
+    let trigger = NyaButton::new(
+        "stats-login-users-button",
+        if available {
+            stats.users.len().to_string()
+        } else {
+            "—".to_string()
+        },
+    )
+    .icon("icons/users.svg")
+    .variant(NyaButtonVariant::Ghost)
+    .small()
+    .compact()
+    .height(px(22.))
+    .text_size(px(11.))
+    .tooltip(summary.clone());
+    let mut rows = div()
+        .id("stats-login-users-list")
+        .flex()
+        .flex_col()
+        .gap_1()
+        .min_h_0()
+        .max_h(px(240.));
+    for user in &stats.users {
+        let name = user.name.clone();
+        rows = rows.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .min_w_0()
+                .child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "stats-login-user-{}",
+                            user.name
+                        )))
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .tooltip(move |window, cx| NyaTooltip::new(name.clone()).build(window, cx))
+                        .child(truncate_preview(&user.name, 64)),
+                )
+                .child(div().flex_none().child(user.sessions.to_string())),
+        );
+    }
+    let content = div()
+        .debug_selector(|| "stats-login-users-popover".to_string())
+        .w(px(240.))
+        .max_w(px(280.))
+        .flex()
+        .flex_col()
+        .gap_2()
+        .text_size(px(12.))
+        .text_color(rgb(palette.text))
+        .child(
+            div()
+                .font_weight(FontWeight(700.))
+                .child(t!("resourceMonitor.loginSessions").to_string()),
+        )
+        .child(div().text_color(rgb(palette.text_muted)).child(summary))
+        .child(
+            div()
+                .text_size(px(10.))
+                .text_color(rgb(palette.text_dimmed))
+                .child(t!("resourceMonitor.usersMeaning").to_string()),
+        )
+        .when(available && stats.users.is_empty(), |this| {
+            this.child(t!("resourceMonitor.usersEmpty").to_string())
+        })
+        .child(rows.overflow_y_scrollbar());
+    div()
+        .debug_selector(|| "stats-login-users-trigger".to_string())
+        .flex_none()
+        .child(
+            NyaPopover::new("stats-login-users", trigger, content)
+                .placement(NyaPopoverPlacement::Bottom)
+                .align(NyaPopoverAlign::End),
+        )
+        .into_any_element()
+}
+
 fn resource_section_card(
     palette: crate::theme::ThemePalette,
     icon_path: &'static str,
@@ -2152,6 +2248,95 @@ mod responsive_tests {
                     "identifier overflow at {width}/{scale}: {value:?}"
                 );
                 assert!(value.size.height > px(24.), "identifier must wrap");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod login_users_view_tests {
+    use super::{login_users_action, resource_section_card_with_action};
+    use crate::test_support::TestAppCleanup;
+    use gpui::{
+        Context, IntoElement, Modifiers, Render, TestAppContext, Window, div, point, prelude::*,
+        px, size,
+    };
+    use nyaterm_transport::{LoggedInUser, LoggedInUsersStatus, RemoteStats};
+
+    struct Host {
+        theme: &'static str,
+        users: usize,
+    }
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let palette = nyaterm_ui::theme_palette(self.theme);
+            let stats = RemoteStats {
+                users_status: LoggedInUsersStatus::Available,
+                users: (0..self.users)
+                    .map(|i| LoggedInUser {
+                        name: format!("user-{i:04}-{}", "long".repeat(40)),
+                        sessions: 2,
+                    })
+                    .collect(),
+                ..Default::default()
+            };
+            div().size_full().p(px(10.)).child(
+                div().w(px(180.)).child(resource_section_card_with_action(
+                    palette,
+                    "icons/conn/server.svg",
+                    "System".into(),
+                    Some(login_users_action(&stats, palette)),
+                    div()
+                        .debug_selector(|| "login-system-body".to_string())
+                        .h(px(70.))
+                        .child("hostname / architecture / OS / uptime"),
+                )),
+            )
+        }
+    }
+
+    #[test]
+    fn compact_login_entry_and_popover_fit_narrow_cards_in_both_themes() {
+        for theme in ["dark", "light"] {
+            for users in [0, 1, 100] {
+                let mut cx = TestAppContext::single();
+                let _cleanup = TestAppCleanup::new(&cx);
+                cx.update(|cx| {
+                    nyaterm_ui::apply_component_theme(
+                        nyaterm_ui::theme_palette(theme),
+                        gpui::font("Arial"),
+                        px(12.),
+                        cx,
+                    )
+                });
+                let (_, vcx) = cx.add_window_view(|_, _| Host { theme, users });
+                vcx.simulate_resize(size(px(480.), px(400.)));
+                vcx.update(|window, cx| {
+                    _ = window.draw(cx);
+                });
+                vcx.run_until_parked();
+                let trigger = vcx
+                    .debug_bounds("stats-login-users-trigger")
+                    .expect("users entry");
+                assert!(trigger.right() <= px(190.));
+                assert!(trigger.size.width <= px(65.));
+                vcx.simulate_click(trigger.center(), Modifiers::default());
+                vcx.update(|window, cx| {
+                    _ = window.draw(cx);
+                });
+                vcx.run_until_parked();
+                let popup = vcx
+                    .debug_bounds("stats-login-users-popover")
+                    .expect("opened popover");
+                assert!(popup.right() <= px(480.));
+                assert!(popup.bottom() <= px(400.));
+                assert!(popup.size.height <= px(360.));
+                vcx.simulate_click(point(px(470.), px(390.)), Modifiers::default());
+                vcx.update(|window, cx| {
+                    _ = window.draw(cx);
+                });
+                vcx.run_until_parked();
+                assert!(vcx.debug_bounds("stats-login-users-popover").is_none());
             }
         }
     }

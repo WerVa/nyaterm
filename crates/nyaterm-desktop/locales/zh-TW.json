@@ -2071,7 +2071,14 @@
     "uptime": "執行時長",
     "usagePercent": "使用佔比",
     "used": "已使用",
-    "users": "登入使用者"
+    "users": "登入使用者",
+    "loginSessions": "登入工作階段",
+    "usersSummary": "%{accounts} 個登入帳戶 · %{sessions} 個登入工作階段",
+    "usersPending": "尚未採集",
+    "usersUnavailable": "遠端環境沒有 who 命令",
+    "usersFailed": "登入工作階段採集失敗或逾時",
+    "usersEmpty": "沒有登入工作階段記錄",
+    "usersMeaning": "系統記錄的登入工作階段，不代表所有 SSH 連線。"
   },
   "savedConnections": {
     "sessionImportTitle": "匯入工作階段",
@@ -2916,7 +2923,7 @@
     "remoteStatsInterval": "資源採集間隔（秒）",
     "remoteStatsIntervalDesc": "預設 3 秒",
     "remoteStatsShowUsers": "顯示登入使用者",
-    "remoteStatsShowUsersDesc": "在資源監控與主機概覽標題列中顯示 who 回報的帳戶及其工作階段數。",
+    "remoteStatsShowUsersDesc": "在資源監控的系統卡片中採集並顯示系統記錄的登入工作階段。",
     "removeBackgroundImage": "移除圖片",
     "resumeBrokenTransfer": "斷點續傳",
     "resumeBrokenTransferDesc": "嘗試恢復未完成的檔案傳輸而非重新開始。",

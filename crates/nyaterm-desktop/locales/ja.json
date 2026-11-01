@@ -2071,7 +2071,14 @@
     "uptime": "稼働時間",
     "usagePercent": "使用率",
     "used": "使用中",
-    "users": "ログインユーザー"
+    "users": "ログインユーザー",
+    "loginSessions": "ログインセッション",
+    "usersSummary": "%{accounts} アカウント · %{sessions} ログインセッション",
+    "usersPending": "未取得",
+    "usersUnavailable": "who コマンドが利用できません",
+    "usersFailed": "ログインセッションの取得失敗またはタイムアウト",
+    "usersEmpty": "ログインセッションの記録なし",
+    "usersMeaning": "システムに記録されたログインセッションです。すべての SSH 接続ではありません。"
   },
   "savedConnections": {
     "sessionImportTitle": "セッションをインポート",
@@ -2916,7 +2923,7 @@
     "remoteStatsInterval": "統計間隔 (秒)",
     "remoteStatsIntervalDesc": "既定：3 秒",
     "remoteStatsShowUsers": "ログイン中のユーザーを表示",
-    "remoteStatsShowUsersDesc": "who が報告するアカウントとセッション数を、リソースモニターとホスト概要ヘッダーに表示します。",
+    "remoteStatsShowUsersDesc": "リソースモニターのシステムカードでログインセッションを取得・表示します。",
     "removeBackgroundImage": "画像を削除",
     "resumeBrokenTransfer": "転送を再開",
     "resumeBrokenTransferDesc": "未完了の転送を最初からやり直す代わりに再開します。",

@@ -95,6 +95,7 @@ impl NyaTermApp {
 
     pub(in crate::features) fn toggle_remote_stats_show_users(&mut self, cx: &mut Context<Self>) {
         self.settings.toggle_remote_stats_show_users();
+        self.remote_stats_users_setting_changed(cx);
         self.save_terminal_settings(cx);
     }
 
