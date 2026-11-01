@@ -1626,6 +1626,19 @@ fn format_optional_percent_decimal(value: Option<f64>) -> String {
         .map(|value| format!("{:.1}%", value.clamp(0., 100.)))
         .unwrap_or_else(|| "--".to_string())
 }
+
+fn login_session_value(id: String, value: String) -> gpui::Stateful<gpui::Div> {
+    let tooltip = value.clone();
+    div()
+        .id(SharedString::from(id.clone()))
+        .debug_selector(move || id.clone())
+        .min_w_0()
+        .overflow_hidden()
+        .text_ellipsis()
+        .tooltip(move |window, cx| NyaTooltip::new(tooltip.clone()).build(window, cx))
+        .child(value)
+}
+
 fn login_users_action(
     stats: &nyaterm_transport::RemoteStats,
     palette: crate::theme::ThemePalette,
@@ -1666,17 +1679,106 @@ fn login_users_action(
     .height(px(22.))
     .text_size(px(11.))
     .tooltip(summary.clone());
+    let (row_count, row_height) = if stats.login_sessions.is_empty() {
+        (stats.users.len(), 24.)
+    } else {
+        (stats.login_sessions.len(), 48.)
+    };
     let mut rows = div()
         .id("stats-login-users-list")
         .flex()
         .flex_col()
-        .gap_1()
         .min_h_0()
-        .max_h(px(240.));
-    for user in &stats.users {
+        // A definite viewport height lets the scrollbar wrapper keep its inner
+        // content at natural height rather than also capping it with max_h.
+        .h(px((row_count as f32 * row_height).min(240.)));
+    for (index, session) in stats
+        .login_sessions
+        .iter()
+        .enumerate()
+        .filter(|_| available)
+    {
+        let login_time = if session.login_time.is_empty() {
+            "—".to_string()
+        } else {
+            session.login_time.clone()
+        };
+        rows = rows.child(
+            div()
+                .debug_selector(move || format!("stats-login-session-{index}"))
+                .flex_none()
+                .h(px(row_height))
+                .min_w_0()
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .py(px(6.))
+                .line_height(px(16.))
+                .when(index > 0, |row| {
+                    row.border_t_1().border_color(rgb(palette.border))
+                })
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .min_w_0()
+                        .child(
+                            login_session_value(
+                                format!("stats-login-name-{index}"),
+                                session.name.clone(),
+                            )
+                            .flex_1()
+                            .font_weight(FontWeight(600.)),
+                        )
+                        .child(
+                            login_session_value(
+                                format!("stats-login-terminal-{index}"),
+                                session.terminal.clone(),
+                            )
+                            .max_w(px(112.))
+                            .text_right()
+                            .text_color(rgb(palette.text_muted)),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .min_w_0()
+                        .text_size(px(11.))
+                        .text_color(rgb(palette.text_muted))
+                        .child(
+                            login_session_value(format!("stats-login-time-{index}"), login_time)
+                                .flex_none()
+                                .max_w(px(180.)),
+                        )
+                        .child(div().flex_none().child("·"))
+                        .child(
+                            login_session_value(
+                                format!("stats-login-source-{index}"),
+                                session.source.clone().unwrap_or_else(|| "—".to_string()),
+                            )
+                            .flex_1(),
+                        ),
+                ),
+        );
+    }
+    // Older snapshots can contain account summaries without session details.
+    for user in stats
+        .users
+        .iter()
+        .filter(|_| available && stats.login_sessions.is_empty())
+    {
         let name = user.name.clone();
         rows = rows.child(
             div()
+                .flex_none()
+                .h(px(row_height))
+                .line_height(px(16.))
+                .py_1()
                 .flex()
                 .items_center()
                 .gap_3()
@@ -1699,8 +1801,8 @@ fn login_users_action(
     }
     let content = div()
         .debug_selector(|| "stats-login-users-popover".to_string())
-        .w(px(240.))
-        .max_w(px(280.))
+        .w(px(320.))
+        .max_w(px(320.))
         .flex()
         .flex_col()
         .gap_2()
@@ -1712,16 +1814,12 @@ fn login_users_action(
                 .child(t!("resourceMonitor.loginSessions").to_string()),
         )
         .child(div().text_color(rgb(palette.text_muted)).child(summary))
-        .child(
-            div()
-                .text_size(px(10.))
-                .text_color(rgb(palette.text_dimmed))
-                .child(t!("resourceMonitor.usersMeaning").to_string()),
-        )
         .when(available && stats.users.is_empty(), |this| {
             this.child(t!("resourceMonitor.usersEmpty").to_string())
         })
-        .child(rows.overflow_y_scrollbar());
+        .when(available && !stats.users.is_empty(), |this| {
+            this.child(rows.overflow_y_scrollbar())
+        });
     div()
         .debug_selector(|| "stats-login-users-trigger".to_string())
         .flex_none()
@@ -2258,14 +2356,15 @@ mod login_users_view_tests {
     use super::{login_users_action, resource_section_card_with_action};
     use crate::test_support::TestAppCleanup;
     use gpui::{
-        Context, IntoElement, Modifiers, Render, TestAppContext, Window, div, point, prelude::*,
-        px, size,
+        Context, IntoElement, Modifiers, Render, ScrollDelta, ScrollWheelEvent, TestAppContext,
+        Window, div, point, prelude::*, px, size,
     };
-    use nyaterm_transport::{LoggedInUser, LoggedInUsersStatus, RemoteStats};
+    use nyaterm_transport::{LoggedInSession, LoggedInUser, LoggedInUsersStatus, RemoteStats};
 
     struct Host {
         theme: &'static str,
         users: usize,
+        detailed: bool,
     }
     impl Render for Host {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -2278,6 +2377,22 @@ mod login_users_view_tests {
                         sessions: 2,
                     })
                     .collect(),
+                login_sessions: if self.detailed {
+                    (0..self.users * 2)
+                        .map(|i| LoggedInSession {
+                            name: format!("user-{:04}-{}", i / 2, "long".repeat(40)),
+                            terminal: format!("pts/{i}-{}", "long".repeat(20)),
+                            login_time: if i % 2 == 0 {
+                                "2026-11-01 23:37".into()
+                            } else {
+                                String::new()
+                            },
+                            source: (i % 2 == 0).then(|| "very-long-hostname.example".repeat(10)),
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                },
                 ..Default::default()
             };
             div().size_full().p(px(10.)).child(
@@ -2298,7 +2413,18 @@ mod login_users_view_tests {
     #[test]
     fn compact_login_entry_and_popover_fit_narrow_cards_in_both_themes() {
         for theme in ["dark", "light"] {
-            for users in [0, 1, 100] {
+            for (users, detailed, width, scale) in [
+                (0, true, 360., 1.),
+                (1, true, 360., 1.),
+                (100, true, 360., 1.),
+                (1, false, 360., 1.),
+                (1, true, 400., 1.5),
+                (100, true, 400., 1.5),
+                (1, true, 480., 2.),
+                (100, true, 480., 2.),
+            ] {
+                // Fractional DPI can round child edges by a device pixel.
+                let tolerance = px(1. / scale);
                 let mut cx = TestAppContext::single();
                 let _cleanup = TestAppCleanup::new(&cx);
                 cx.update(|cx| {
@@ -2309,8 +2435,13 @@ mod login_users_view_tests {
                         cx,
                     )
                 });
-                let (_, vcx) = cx.add_window_view(|_, _| Host { theme, users });
-                vcx.simulate_resize(size(px(480.), px(400.)));
+                let (_, vcx) = cx.add_window_view(|_, _| Host {
+                    theme,
+                    users,
+                    detailed,
+                });
+                vcx.simulate_scale_factor_change(scale);
+                vcx.simulate_resize(size(px(width), px(400.)));
                 vcx.update(|window, cx| {
                     _ = window.draw(cx);
                 });
@@ -2328,10 +2459,53 @@ mod login_users_view_tests {
                 let popup = vcx
                     .debug_bounds("stats-login-users-popover")
                     .expect("opened popover");
-                assert!(popup.right() <= px(480.));
-                assert!(popup.bottom() <= px(400.));
+                assert!(popup.left() + tolerance >= px(0.));
+                assert!(popup.right() <= px(width) + tolerance);
+                assert!(popup.bottom() <= px(400.) + tolerance);
                 assert!(popup.size.height <= px(360.));
-                vcx.simulate_click(point(px(470.), px(390.)), Modifiers::default());
+                assert_eq!(popup.size.width, px(320.));
+                if detailed && users > 0 {
+                    let first = vcx.debug_bounds("stats-login-session-0").unwrap();
+                    assert!(first.size.height >= px(40.));
+                    assert!(first.left() + tolerance >= popup.left());
+                    assert!(first.right() <= popup.right() + tolerance);
+                    for field in [
+                        "stats-login-name-0",
+                        "stats-login-terminal-0",
+                        "stats-login-time-0",
+                        "stats-login-source-0",
+                    ] {
+                        let bounds = vcx.debug_bounds(field).unwrap();
+                        assert!(
+                            bounds.left() + tolerance >= first.left(),
+                            "{field}: {bounds:?}"
+                        );
+                        assert!(
+                            bounds.right() <= first.right() + tolerance,
+                            "{field}: {bounds:?}"
+                        );
+                    }
+                    if users == 100 {
+                        let last_before = vcx.debug_bounds("stats-login-session-199").unwrap();
+                        assert!(last_before.bottom() > popup.bottom());
+                        vcx.simulate_event(ScrollWheelEvent {
+                            position: first.center(),
+                            delta: ScrollDelta::Pixels(point(px(0.), px(-20_000.))),
+                            ..Default::default()
+                        });
+                        vcx.update(|window, cx| {
+                            _ = window.draw(cx);
+                        });
+                        vcx.run_until_parked();
+                        let last_after = vcx.debug_bounds("stats-login-session-199").unwrap();
+                        assert!(
+                            last_after.top() < last_before.top(),
+                            "{last_before:?} -> {last_after:?}"
+                        );
+                        assert!(last_after.bottom() <= popup.bottom() + tolerance);
+                    }
+                }
+                vcx.simulate_click(point(px(width - 10.), px(390.)), Modifiers::default());
                 vcx.update(|window, cx| {
                     _ = window.draw(cx);
                 });

@@ -116,6 +116,7 @@ impl StatsPaneState {
         self.users_refresh_pending = enabled;
         for stats in self.snapshots.values_mut() {
             stats.users.clear();
+            stats.login_sessions.clear();
             stats.users_status = nyaterm_transport::LoggedInUsersStatus::NotCollected;
         }
         self.touch();
@@ -430,6 +431,7 @@ impl StatsPaneState {
             && let Ok(stats) = &mut event.result
         {
             stats.users.clear();
+            stats.login_sessions.clear();
             stats.users_status = nyaterm_transport::LoggedInUsersStatus::NotCollected;
         }
         // A tab switch invalidates the presentation job, but a bounded icon
@@ -652,7 +654,7 @@ mod tests {
 
     #[test]
     fn toggling_users_clears_cache_and_discards_only_user_data_from_old_jobs() {
-        use nyaterm_transport::{LoggedInUser, LoggedInUsersStatus};
+        use nyaterm_transport::{LoggedInSession, LoggedInUser, LoggedInUsersStatus};
         let mut state = StatsPaneState::new();
         let mut snapshot = stats(&[("eth0", 10., 20.)]);
         snapshot.users = vec![LoggedInUser {
@@ -660,10 +662,24 @@ mod tests {
             sessions: 2,
         }];
         snapshot.users_status = LoggedInUsersStatus::Available;
+        snapshot.login_sessions = vec![LoggedInSession {
+            name: "alice".into(),
+            terminal: "pts/0".into(),
+            login_time: "2026-11-01 23:37".into(),
+            source: Some("host.example".into()),
+        }];
         state.apply_data("a", snapshot.clone());
         let ticket = state.begin_job("a".into(), false);
         state.invalidate_users(false);
         assert!(state.stats_presentation().data.unwrap().users.is_empty());
+        assert!(
+            state
+                .stats_presentation()
+                .data
+                .unwrap()
+                .login_sessions
+                .is_empty()
+        );
         assert!(!state.take_users_refresh_due());
         state.apply_stats_event(
             StatsJobResult {
@@ -676,6 +692,7 @@ mod tests {
         );
         let current = state.stats_presentation().data.unwrap();
         assert!(current.users.is_empty());
+        assert!(current.login_sessions.is_empty());
         assert_eq!(current.users_status, LoggedInUsersStatus::NotCollected);
         assert_eq!(current.networks.len(), 1);
         state.invalidate_users(true);
