@@ -2737,7 +2737,7 @@ async fn run_sftp_only_session(
             _ = tokio::time::sleep(Duration::from_millis(250)) => {
                 if let Some(handle) = multiplex
                     && (handle.is_closed() || handle.inner.target.lock().await.is_closed()) {
-                    events.push(SessionEvent::Exited { session_id: session_id.to_owned(), reason: "SSH connection closed".into() });
+                    events.push(SessionEvent::Exited { session_id: session_id.to_owned(), reason: nyaterm_core::link_recovery::SSH_REASON_CONNECTION_CLOSED.into() });
                     break;
                 }
             }
@@ -3018,7 +3018,7 @@ async fn run_open_ssh_shell_session(
                     None => {
                         event_queue.push_async(SessionEvent::Exited {
                             session_id: session_id.clone(),
-                            reason: "SSH connection task ended".to_string(),
+                            reason: nyaterm_core::link_recovery::SSH_REASON_CONNECTION_TASK_ENDED.to_string(),
                         }).await;
                         break;
                     }
@@ -3445,6 +3445,9 @@ impl SshPtyDimensions {
     }
 }
 
+/// How long a silent SSH link is kept before it is declared lost.
+const SSH_LINK_GRACE: Duration = Duration::from_secs(30);
+
 fn ssh_client_config(config: &SshSessionConfig) -> anyhow::Result<Arc<russh::client::Config>> {
     let keepalive_interval = if config.keep_alive_interval_secs == 0
         || config.keep_alive_mode
@@ -3457,13 +3460,20 @@ fn ssh_client_config(config: &SshSessionConfig) -> anyhow::Result<Arc<russh::cli
         )))
     };
     let preferred = resolve_preferred_algorithms(config.ssh_algorithms.as_ref())?;
+    // The library drops a silent link after `keepalive_max` unanswered probes, and
+    // a dropped link cannot come back. Tolerate at least the grace window so a
+    // short network blip resumes the same connection instead of forcing a
+    // reconnect.
+    let keepalive_max = keepalive_interval.map_or(3, |interval| {
+        nyaterm_core::link_recovery::keepalive_max_for_grace(interval, SSH_LINK_GRACE)
+    });
     Ok(Arc::new(russh::client::Config {
         window_size: 32 * 1024 * 1024,
         maximum_packet_size: 32 * 1024,
         nodelay: true,
         inactivity_timeout: None,
         keepalive_interval,
-        keepalive_max: 3,
+        keepalive_max,
         keepalive_mode: match config.keep_alive_mode {
             nyaterm_core::terminal::connection_input::KeepaliveMode::Strict => {
                 russh::client::KeepaliveMode::Strict

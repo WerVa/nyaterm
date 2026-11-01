@@ -266,6 +266,7 @@ impl NyaTermApp {
             return;
         }
 
+        self.session.link_recovery_mut().finish(&session_id);
         self.session.begin_disconnect_action(session_id.clone());
         // Backend may already be gone (race with Exited); still mark disconnected.
         if self.remote_desktop.is_session(&session_id) {
@@ -339,6 +340,18 @@ impl NyaTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.reconnect_session_with(session_id, Some(window), false, cx);
+    }
+
+    /// Shared by the user's reconnect and the automatic one. `automatic` attempts
+    /// have no window to focus and must not cancel the recovery that started them.
+    pub(in crate::features) fn reconnect_session_with(
+        &mut self,
+        session_id: String,
+        window: Option<&mut Window>,
+        automatic: bool,
+        cx: &mut Context<Self>,
+    ) {
         if self.session.session_is_busy(&session_id) {
             self.shell
                 .set_status("session action already in progress".to_string());
@@ -356,6 +369,10 @@ impl NyaTermApp {
                 .set_status("session cannot be reconnected".to_string());
             cx.notify();
             return;
+        }
+        if !automatic {
+            // The user took over; a pending automatic retry must not fire after this.
+            self.session.link_recovery_mut().finish(&session_id);
         }
         self.remote_ops.clear_stats_sample(&session_id);
         self.session.begin_reconnect_action(session_id.clone());
@@ -494,7 +511,8 @@ impl NyaTermApp {
         self.session.finish_busy_action(&old_id);
         self.session.retain_busy_actions_for_live_sessions();
         self.shell.show_workspace();
-        if self.session.active_id() == Some(old_id.as_str())
+        if let Some(window) = window
+            && self.session.active_id() == Some(old_id.as_str())
             && self.session.start_reconnect_is_pending(&old_id)
         {
             self.focus_user_started_session_surface(SessionStartFocusTarget::Terminal, window, cx);

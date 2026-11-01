@@ -2731,6 +2731,8 @@
     "keepAliveInterval": "Keep-Alive 間隔 (秒)",
     "reconnectRestoreCwd": "重新連線後還原工作目錄",
     "reconnectRestoreCwdDesc": "將 SSH 工作階段還原到最後可信的工作目錄。",
+    "autoReconnect": "自動重新連線",
+    "autoReconnectDesc": "SSH 連線中斷後自動重新連線，每次嘗試之間的等待時間逐漸增加。",
     "keepAliveIntervalDesc": "每隔 X 秒傳送 SSH keep-alive 資料包。設定為 0 也會停用 Keep-Alive。",
     "keepAliveMode": "SSH Keep-Alive 模式",
     "keepAliveModeCompatible": "相容模式（建議）",

@@ -70,6 +70,7 @@ pub(in crate::features) struct SessionFeatureState {
     locked_tabs: HashSet<String>,
     tab_drag: Option<SessionTabDragState>,
     protocols: SessionProtocolRuntimeState,
+    link_recovery: link_recovery::LinkRecoveryRegistry,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -500,6 +501,7 @@ impl SessionFeatureState {
             locked_tabs: HashSet::new(),
             tab_drag: None,
             protocols: SessionProtocolRuntimeState::default(),
+            link_recovery: link_recovery::LinkRecoveryRegistry::default(),
         }
     }
 
@@ -620,6 +622,16 @@ impl SessionFeatureState {
         if self.start.visible_tab_reservation_count() == 0 {
             self.clear_start_tab_placements();
         }
+    }
+
+    pub(in crate::features) fn link_recovery(&self) -> &link_recovery::LinkRecoveryRegistry {
+        &self.link_recovery
+    }
+
+    pub(in crate::features) fn link_recovery_mut(
+        &mut self,
+    ) -> &mut link_recovery::LinkRecoveryRegistry {
+        &mut self.link_recovery
     }
 
     pub(in crate::features) fn start_reconnect_is_pending(&self, session_id: &str) -> bool {
@@ -3718,4 +3730,5 @@ pub(super) fn failed_session_start_display_name(failed: &FailedSessionStart) -> 
 #[cfg(test)]
 mod tests;
 
+mod link_recovery;
 mod tab_actions;

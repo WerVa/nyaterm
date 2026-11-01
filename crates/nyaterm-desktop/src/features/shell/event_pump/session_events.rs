@@ -454,6 +454,9 @@ impl NyaTermApp {
             return false;
         }
         let known_session = self.session.has_session(&session_id);
+        // Read before the cleanup below marks the session disconnected: an exit
+        // that follows the user's own disconnect or reconnect must not recover.
+        let already_disconnected = self.session.is_disconnected(&session_id);
         tracing::warn!(
             diagnostic = "session_exited",
             session_id = %session_id,
@@ -479,6 +482,7 @@ impl NyaTermApp {
             self.mark_session_disconnected(&session_id, cx);
             self.shell
                 .set_status(format!("session disconnected {}", short_id(&session_id)));
+            self.maybe_begin_link_recovery(&session_id, &reason, already_disconnected, cx);
         } else {
             self.shell
                 .set_status(format!("session exited {}", short_id(&session_id)));

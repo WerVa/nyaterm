@@ -2724,6 +2724,8 @@
     "keepAliveInterval": "Keep-Alive Interval (seconds)",
     "reconnectRestoreCwd": "Restore directory after reconnect",
     "reconnectRestoreCwdDesc": "Return SSH sessions to the last trusted working directory.",
+    "autoReconnect": "Reconnect automatically",
+    "autoReconnectDesc": "Reopen SSH sessions after the connection drops, with increasing waits between attempts.",
     "keepAliveIntervalDesc": "Send SSH keep-alive packets every X seconds. 0 to disable.",
     "keepAliveMode": "Keep-alive mode",
     "keepAliveModeCompatible": "Compatible",

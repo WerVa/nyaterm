@@ -314,6 +314,7 @@
       "terminal_show_multi_line_paste_dialog": "local",
       "terminal_paste_image_as_path": "local",
       "terminal_reconnect_restore_cwd": "local",
+      "terminal_auto_reconnect": "local",
       "terminal_low_latency_mode": "local",
       "terminal_zebra_stripes_enabled": "local",
       "terminal_action_links_enabled": "local",

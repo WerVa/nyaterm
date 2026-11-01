@@ -960,6 +960,9 @@ impl NyaTermApp {
                 if let Some(connection_id) = source_connection_id.as_deref() {
                     self.complete_mcp_session_open_failure(connection_id, &error);
                 }
+                if reconnect_failure && let Some(old_id) = reconnect_session_id.as_deref() {
+                    self.link_recovery_attempt_failed(old_id, &error, cx);
+                }
                 if !reconnect_failure {
                     self.shell
                         .set_last_connect_failure(connection_name.clone(), error.clone());
@@ -1017,6 +1020,7 @@ impl NyaTermApp {
                 self.session
                     .start
                     .set_reconnect_failure(old_id.to_string(), error.clone());
+                self.link_recovery_attempt_failed(old_id, &error, cx);
             }
             if let Some(connection_id) = completion.source_connection_id.as_deref() {
                 self.complete_mcp_session_open_failure(connection_id, &error);
@@ -1027,6 +1031,8 @@ impl NyaTermApp {
         }
 
         self.migrate_reconnected_session_state(old_id, new_id, cx);
+        // Recovered: end the episode. A later loss on the new session starts fresh.
+        self.session.link_recovery_mut().finish(old_id);
         self.remove_session_state(old_id, cx);
         self.persist_workspace_pane_layout();
         self.persist_terminal_window_layout();

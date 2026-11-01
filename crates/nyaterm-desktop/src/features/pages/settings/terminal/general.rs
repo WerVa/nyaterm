@@ -203,6 +203,19 @@ impl SettingsPanel {
                     ))
                     .child(settings_form_row(
                         palette,
+                        t!("settings.autoReconnect"),
+                        Some(SharedString::from(t!("settings.autoReconnectDesc"))),
+                        settings_switch(
+                            palette,
+                            "terminal-auto-reconnect",
+                            self.settings.summary().terminal_auto_reconnect,
+                            cx.listener(|this, _, _, cx| {
+                                this.toggle_terminal_auto_reconnect(cx);
+                            }),
+                        ),
+                    ))
+                    .child(settings_form_row(
+                        palette,
                         t!("settings.reconnectRestoreCwd"),
                         Some(SharedString::from(t!("settings.reconnectRestoreCwdDesc"))),
                         settings_switch(

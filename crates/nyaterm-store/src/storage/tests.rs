@@ -3482,6 +3482,50 @@ fn header_status_settings_roundtrip_and_preserve_unknown_ui_fields() {
 }
 
 #[test]
+fn auto_reconnect_defaults_on_for_data_written_before_it_existed_and_round_trips() {
+    let dir = unique_temp_dir("auto-reconnect-setting");
+    let store = ConnectionStore::open(&dir).unwrap();
+    // A settings document from a release that had no `auto_reconnect` key, with
+    // an unrelated key that must survive the save.
+    store
+        .save_settings_value(&serde_json::json!({
+            "terminal": {
+                "reconnect_restore_cwd": true,
+                "future_terminal_option": {"keep": true}
+            }
+        }))
+        .unwrap();
+
+    let mut settings = store.load_app_settings_summary().unwrap();
+    assert!(settings.terminal_auto_reconnect, "absent key means on");
+    assert!(settings.terminal_reconnect_restore_cwd);
+
+    settings.terminal_auto_reconnect = false;
+    store.save_terminal_settings(&settings).unwrap();
+
+    let raw = store.load_settings_value().unwrap();
+    assert_eq!(raw["terminal"]["auto_reconnect"], false);
+    assert_eq!(raw["terminal"]["future_terminal_option"]["keep"], true);
+    assert!(
+        !store
+            .load_app_settings_summary()
+            .unwrap()
+            .terminal_auto_reconnect
+    );
+
+    settings.terminal_auto_reconnect = true;
+    store.save_terminal_settings(&settings).unwrap();
+    assert!(
+        store
+            .load_app_settings_summary()
+            .unwrap()
+            .terminal_auto_reconnect
+    );
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn retired_ime_setting_survives_loading_and_saving_interaction_settings() {
     for legacy_enabled in [false, true] {
         let dir = unique_temp_dir("retired-ime-setting");

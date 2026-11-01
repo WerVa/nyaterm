@@ -452,6 +452,9 @@ pub struct AppSettingsSummary {
     pub terminal_paste_image_as_path: bool,
     #[serde(default)]
     pub terminal_reconnect_restore_cwd: bool,
+    /// Reconnect SSH sessions by themselves after the connection is lost.
+    #[serde(default = "default_terminal_auto_reconnect")]
+    pub terminal_auto_reconnect: bool,
     /// Retained only to round-trip legacy settings; no longer affects terminal behavior.
     #[serde(default)]
     pub terminal_low_latency_mode: bool,
@@ -736,6 +739,7 @@ impl Default for AppSettingsSummary {
             terminal_show_multi_line_paste_dialog: true,
             terminal_paste_image_as_path: true,
             terminal_reconnect_restore_cwd: false,
+            terminal_auto_reconnect: default_terminal_auto_reconnect(),
             terminal_low_latency_mode: false,
             terminal_zebra_stripes_enabled: default_terminal_zebra_stripes_enabled(),
             terminal_action_links_enabled: false,
@@ -951,6 +955,10 @@ fn default_terminal_timestamp_format() -> String {
 }
 
 fn default_terminal_zebra_stripes_enabled() -> bool {
+    true
+}
+
+fn default_terminal_auto_reconnect() -> bool {
     true
 }
 

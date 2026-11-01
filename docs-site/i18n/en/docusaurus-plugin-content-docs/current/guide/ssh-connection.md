@@ -328,6 +328,16 @@ After importing, it is a good idea to verify:
 - Whether proxy / jump host / OTP binding still needs to be added
 - Whether saved passwords or keys are already matched correctly
 
+## Automatic reconnect
+
+When the connection to a server drops underneath a running session (network change, laptop sleep, keepalive timeout), NyaTerm reconnects the tab by itself and shows each attempt in the terminal. Waits grow from 1 second up to 30 seconds, and it stops after 12 attempts or 10 minutes. Press Enter in the tab to reconnect immediately, or close the tab to cancel.
+
+- With keep-alive enabled, a silent connection is kept for at least 30 seconds before it is declared lost (with the default 30-second interval it is about two minutes), so a short network blip resumes the same connection and running programs are not interrupted. A lower keep-alive interval detects a dead connection sooner.
+- After the connection is truly lost, the reconnect opens a new shell. Programs that were running in the old shell are gone unless you ran them in `tmux` or `screen`. Turn on **Restore directory after reconnect** to return to the last working directory.
+- It never reconnects after you type `exit`, disconnect a tab yourself, or when the server closes the session normally.
+- It stops at once, without retrying, when authentication fails or the host key changed, so a stale password is not tried repeatedly against the server. Press Enter to reconnect by hand.
+- Turn it off in **Settings > Terminal > Reconnect automatically**.
+
 ## Host key policy
 
 NyaTerm maintains known-host records and offers three SSH host key policies:

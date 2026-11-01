@@ -2724,6 +2724,8 @@
     "keepAliveInterval": "Keep-Alive 间隔 (秒)",
     "reconnectRestoreCwd": "重连后恢复工作目录",
     "reconnectRestoreCwdDesc": "将 SSH 会话恢复到最后可信的工作目录。",
+    "autoReconnect": "自动重新连接",
+    "autoReconnectDesc": "SSH 连接断开后自动重新连接，每次尝试之间的等待时间逐渐增加。",
     "keepAliveIntervalDesc": "每隔 X 秒发送 SSH keep-alive 控制包。设置为 0 以禁用。",
     "keepAliveMode": "Keep-alive 模式",
     "keepAliveModeCompatible": "兼容",

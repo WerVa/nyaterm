@@ -8,6 +8,7 @@ use nyaterm_transport::RemoteFileService;
 
 mod auth_runtime;
 mod duplicate_prompts;
+mod link_recovery_runtime;
 mod prompt_runtime;
 mod recording_runtime;
 pub(in crate::features) mod runtime_auth;

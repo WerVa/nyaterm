@@ -323,6 +323,7 @@ impl NyaTermApp {
         session_id: &str,
         cx: &mut Context<Self>,
     ) {
+        self.session.link_recovery_mut().finish(session_id);
         self.clear_terminal_composition_for_session(session_id, cx);
         self.transfer.cancel_bulk_jobs_for_session(session_id);
         self.reconcile_bulk_transfer_jobs();
