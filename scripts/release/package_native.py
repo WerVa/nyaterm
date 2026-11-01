@@ -81,6 +81,10 @@ class PackageIdentity:
     desktop_id: str
 
     @property
+    def url_schemes(self) -> tuple[str, ...]:
+        return (self.desktop_id, "ssh", "telnet") if self.desktop_id == "nyaterm" else (self.desktop_id,)
+
+    @property
     def macos_bundle_name(self) -> str:
         return f"{self.display_name}.app"
 
@@ -411,6 +415,23 @@ def create_windows_packages(
 
     output = DIST_DIR / f"{APP_NAME}_{artifact_version}_{info.label}-setup.exe"
     script = WORK_DIR / "nyaterm-installer.nsi"
+    protocol_command = r'$\"$INSTDIR\NyaTerm.exe$\" $\"%1$\"'
+    protocol_install = "\n".join(
+        f'WriteRegStr HKCU "Software\\Classes\\{scheme}{suffix}" "{name}" "{value}"'
+        for scheme in identity.url_schemes
+        for suffix, name, value in (
+            ("", "", f"URL:{identity.display_name} Protocol"), ("", "URL Protocol", ""),
+            (r"\DefaultIcon", "", r"$INSTDIR\NyaTerm.exe,0"),
+            (r"\shell\open\command", "", protocol_command),
+        )
+    )
+    protocol_uninstall = "\n".join(
+        f'ReadRegStr $0 HKCU "Software\\Classes\\{scheme}\\shell\\open\\command" ""\n'
+        f'StrCmp $0 "{protocol_command}" 0 protocol_skip_{scheme}\n'
+        f'DeleteRegKey HKCU "Software\\Classes\\{scheme}"\nprotocol_skip_{scheme}:'
+        for scheme in identity.url_schemes
+    )
+
     script.write_text(
         textwrap.dedent(
             rf"""
@@ -454,10 +475,7 @@ def create_windows_packages(
               {conpty_install}
               WriteUninstaller "$INSTDIR\Uninstall.exe"
               WriteRegStr HKCU "{identity.windows_registry_key}" "InstallDir" "$INSTDIR"
-              WriteRegStr HKCU "Software\Classes\{identity.desktop_id}" "" "URL:{identity.display_name} Protocol"
-              WriteRegStr HKCU "Software\Classes\{identity.desktop_id}" "URL Protocol" ""
-              WriteRegStr HKCU "Software\Classes\{identity.desktop_id}\DefaultIcon" "" "$INSTDIR\NyaTerm.exe,0"
-              WriteRegStr HKCU "Software\Classes\{identity.desktop_id}\shell\open\command" "" "$\"$INSTDIR\NyaTerm.exe$\" $\"%1$\""
+              {protocol_install}
               WriteRegStr HKCU "{identity.windows_uninstall_key}" "DisplayName" "{identity.display_name}"
               WriteRegStr HKCU "{identity.windows_uninstall_key}" "DisplayVersion" "{version}"
               WriteRegStr HKCU "{identity.windows_uninstall_key}" "DisplayIcon" "$INSTDIR\NyaTerm.exe"
@@ -480,7 +498,7 @@ def create_windows_packages(
               Delete "$INSTDIR\icon.ico"
               Delete "$INSTDIR\Uninstall.exe"
               RMDir "$INSTDIR"
-              DeleteRegKey HKCU "Software\Classes\{identity.desktop_id}"
+              {protocol_uninstall}
               DeleteRegKey HKCU "{identity.windows_uninstall_key}"
               DeleteRegKey HKCU "{identity.windows_registry_key}"
             SectionEnd
@@ -535,7 +553,7 @@ def create_macos_packages(
             {
                 "CFBundleTypeRole": "Viewer",
                 "CFBundleURLName": identity.macos_identifier,
-                "CFBundleURLSchemes": [identity.desktop_id],
+                "CFBundleURLSchemes": list(identity.url_schemes),
             }
         ],
         "CFBundleVersion": version,
@@ -625,7 +643,7 @@ def write_desktop_file(
             StartupWMClass={identity.desktop_id}
             Terminal=false
             Categories=Development;TerminalEmulator;Network;
-            MimeType=x-scheme-handler/{identity.desktop_id};
+            MimeType={"".join(f"x-scheme-handler/{scheme};" for scheme in identity.url_schemes)}
             StartupNotify=true
             """
         ).lstrip(),

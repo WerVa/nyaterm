@@ -3961,5 +3961,12 @@
   "input": {
     "showSecret": "Afficher la valeur",
     "hideSecret": "Masquer la valeur"
+  },
+  "externalOpen": {
+    "queueFull": "Trop de demandes de connexion externes. Réessayez plus tard.",
+    "invalidUrl": "Demande de connexion externe refusée : paramètres invalides ou non pris en charge.",
+    "matchTitle": "Choisir une connexion",
+    "matchDescription": "Plusieurs connexions enregistrées correspondent. Choisissez-en une ou ouvrez une connexion temporaire.",
+    "useTemporary": "Ouvrir une connexion temporaire"
   }
 }

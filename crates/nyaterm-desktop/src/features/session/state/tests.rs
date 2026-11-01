@@ -157,6 +157,7 @@ fn consuming_an_entire_sideband_prefix_keeps_ui_routing_after_the_drain_complete
 
 fn pending(name: &str) -> PendingSessionStart {
     PendingSessionStart {
+        requested_ssh_runtime_mode: None,
         attempt: Default::default(),
         connection_name: name.to_string(),
         launch_config: None,
@@ -2250,6 +2251,41 @@ fn pending_registration_promotes_saved_preparation_without_changing_placement() 
             .insert_index,
         3
     );
+}
+
+#[test]
+fn saved_ssh_mode_survives_failure_before_config_build_and_retry_preparation() {
+    use nyaterm_core::models::ssh_runtime::SshRuntimeMode;
+
+    for mode in [SshRuntimeMode::Terminal, SshRuntimeMode::Sftp] {
+        let mut starts = SessionStartFeatureState::new();
+        let mut request = pending("saved");
+        request.launch_config = None;
+        request.source_connection_id = Some("saved-connection".into());
+        request.requested_ssh_runtime_mode = Some(mode);
+        starts.register_pending("first".into(), request);
+        let SessionStartEventRequest::Pending {
+            pending,
+            was_active,
+        } = starts.take_event_request("first")
+        else {
+            panic!("expected pending request");
+        };
+        starts.record_failure(
+            "first".into(),
+            pending,
+            "config failed".into(),
+            was_active,
+            false,
+        );
+        let failed = starts.take_failed_for_retry("first").unwrap();
+        assert_eq!(failed.pending.ssh_runtime_mode(), Some(mode));
+        starts.begin_retry_preparation("retry".into(), failed.pending);
+        assert_eq!(
+            starts.pending.get("retry").unwrap().ssh_runtime_mode(),
+            Some(mode)
+        );
+    }
 }
 
 #[test]

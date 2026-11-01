@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod single_instance;
+#[cfg(windows)]
+mod url_protocols;
 
 use anyhow::Context as _;
 use gpui::{App, AppContext};
@@ -14,6 +16,10 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 use single_instance::{SingleInstanceOutcome, acquire};
 
 fn main() -> anyhow::Result<()> {
+    #[cfg(windows)]
+    if let Some(result) = url_protocols::run_if_requested() {
+        return result;
+    }
     if let Some(status) = nyaterm_store::run_cloud_snapshot_decode_helper_if_requested() {
         std::process::exit(status);
     }

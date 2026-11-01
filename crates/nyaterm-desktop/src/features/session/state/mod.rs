@@ -41,6 +41,7 @@ const DEFAULT_DUPLICATE_STARTUP_DELAY_MS: u64 = 500;
 const ACTIVE_HISTORY_LIMIT: usize = 64;
 
 pub(in crate::features) struct SessionFeatureState {
+    pub(in crate::features) unsupported_restore_tabs: Vec<nyaterm_core::RestorableOpenTab>,
     manager: Arc<SessionManager>,
     ssh_connections: SshConnectionPool,
     event_bridge: SessionEventBridge,
@@ -447,6 +448,7 @@ impl SessionFeatureState {
         focus: SessionFeatureFocus,
     ) -> Self {
         Self {
+            unsupported_restore_tabs: Vec::new(),
             manager,
             ssh_connections,
             event_bridge,
@@ -510,6 +512,10 @@ impl SessionFeatureState {
 
     pub(in crate::features) fn manager_handle(&self) -> Arc<SessionManager> {
         Arc::clone(&self.manager)
+    }
+
+    pub(in crate::features) fn external_start_is_busy(&self) -> bool {
+        self.start.is_busy()
     }
 
     pub(in crate::features) fn start_has_pending(&self) -> bool {
@@ -3039,6 +3045,8 @@ impl SessionDialogState {
 }
 
 pub(in crate::features) struct PendingSessionStart {
+    /// Retains an external override before a saved connection's config is built.
+    pub requested_ssh_runtime_mode: Option<nyaterm_core::models::ssh_runtime::SshRuntimeMode>,
     pub attempt: nyaterm_transport::connection_attempt::ConnectionAttempt,
     pub connection_name: String,
     pub launch_config: Option<SessionLaunchConfig>,
@@ -3058,6 +3066,19 @@ pub(in crate::features) struct PendingSessionStart {
     pub tab_placement: Option<SessionStartTabPlacement>,
     /// Existing pane being replaced by this request, when this is a reconnect.
     pub reconnect_session_id: Option<String>,
+}
+
+impl PendingSessionStart {
+    pub(in crate::features) fn ssh_runtime_mode(
+        &self,
+    ) -> Option<nyaterm_core::models::ssh_runtime::SshRuntimeMode> {
+        self.requested_ssh_runtime_mode.or_else(|| {
+            self.launch_config.as_ref().and_then(|config| match config {
+                SessionLaunchConfig::Ssh(config) => Some(config.effective_runtime_mode()),
+                _ => None,
+            })
+        })
+    }
 }
 
 pub(in crate::features) struct PendingReconnectCompletion {
@@ -3129,6 +3150,7 @@ pub(in crate::features) enum SessionStartEventRequest {
 
 #[derive(Clone, Default)]
 pub(in crate::features) struct SavedConnectionStartOptions {
+    pub ssh_runtime_mode: Option<nyaterm_core::models::ssh_runtime::SshRuntimeMode>,
     pub custom_name: Option<String>,
     pub tab_color: Option<u32>,
     pub locked: bool,
@@ -3175,6 +3197,10 @@ impl SessionStartFeatureState {
 
     pub(in crate::features) fn has_pending(&self) -> bool {
         !self.pending.is_empty()
+    }
+
+    pub(in crate::features) fn is_busy(&self) -> bool {
+        !self.pending.is_empty() || !self.preparing_saved_connections.is_empty()
     }
 
     pub(in crate::features) fn has_failed(&self) -> bool {

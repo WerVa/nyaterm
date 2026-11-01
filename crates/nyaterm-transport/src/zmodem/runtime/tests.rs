@@ -24,6 +24,7 @@ fn mock_session() -> (Arc<SessionManager>, ssh_mailbox::Receiver) {
     manager.sessions.lock().unwrap().insert(
         "test".into(),
         ManagedSession::Ssh(SshChannelTransport {
+            shell_enabled: true,
             info: SessionInfo {
                 id: "test".into(),
                 name: "test".into(),

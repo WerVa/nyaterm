@@ -209,6 +209,7 @@ impl NyaTermApp {
                 drained_events += 1;
                 match event {
                     SessionEvent::Output { session_id, data } => {
+                        self.ensure_sftp_session_view(&session_id, cx);
                         output_event_count += 1;
                         let chunk_input_bytes = data.len();
                         processed_output_bytes =

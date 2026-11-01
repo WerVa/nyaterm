@@ -863,6 +863,7 @@ impl NyaTermApp {
         cx: &mut Context<Self>,
     ) {
         let SavedConnectionStartOptions {
+            ssh_runtime_mode,
             custom_name,
             tab_color,
             locked,
@@ -886,6 +887,7 @@ impl NyaTermApp {
         let multiplex_key = format!("ssh-session:{}", uuid());
         let request_id = self.register_pending_session_start(
             PendingSessionStartRegistration {
+                requested_ssh_runtime_mode: ssh_runtime_mode,
                 connection_name: connection_name.clone(),
                 launch_config: None,
                 kind: SessionKind::Ssh,
@@ -936,7 +938,11 @@ impl NyaTermApp {
                     &mut Vec::new(),
                     &build_context,
                 )?;
+                if let Some(mode) = ssh_runtime_mode {
+                    config.runtime_mode = mode;
+                }
                 config.deferred_pty = true;
+                config.apply_runtime_policy()?;
                 if let Some(geometry) = desired_geometry {
                     config.cols = geometry.cols;
                     config.rows = geometry.rows;
@@ -1131,6 +1137,7 @@ pub(in crate::features) fn build_ssh_session_config_with_context(
     });
 
     Ok(SshSessionConfig {
+        runtime_mode: Default::default(),
         attempt: context.attempt.clone(),
         name: connection.name.clone(),
         host,

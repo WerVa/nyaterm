@@ -522,7 +522,10 @@ fn forwarded_tcpip_sender_for(
         .cloned()
 }
 
-pub fn open_ssh_multiplex_handle(config: SshSessionConfig) -> anyhow::Result<SshMultiplexHandle> {
+pub fn open_ssh_multiplex_handle(
+    mut config: SshSessionConfig,
+) -> anyhow::Result<SshMultiplexHandle> {
+    config.apply_runtime_policy().map_err(anyhow::Error::msg)?;
     let agent_forwarding_config = effective_agent_forwarding_config(&config);
     let agent_stored_key_revision = current_agent_stored_key_revision(&config);
     let runtime = Arc::new(
@@ -643,6 +646,7 @@ pub struct TelnetTransport {
 
 pub struct SshChannelTransport {
     info: SessionInfo,
+    shell_enabled: bool,
     attempt: connection_attempt::ConnectionAttempt,
     command_tx: ssh_mailbox::Sender,
     backspace_as_bs: bool,
@@ -1114,6 +1118,9 @@ impl SessionManager {
         config: LocalSessionConfig,
         shell: local_shell::ResolvedLocalShell,
     ) -> Result<SessionInfo, SessionError> {
+        shell
+            .validate_working_directory(config.working_dir.as_deref())
+            .map_err(|error| SessionError::Spawn(error.into()))?;
         self.ensure_reaper()?;
         let mut sessions = self
             .sessions
@@ -1383,14 +1390,31 @@ impl SessionManager {
         &self,
         config: SshSessionConfig,
     ) -> Result<SessionInfo, SessionError> {
-        self.create_ssh_session_inner(config, None)
+        let multiplex =
+            if config.runtime_mode == nyaterm_core::models::ssh_runtime::SshRuntimeMode::Sftp {
+                Some(open_ssh_multiplex_handle(config.clone()).map_err(|source| {
+                    SessionError::CreateSsh {
+                        addr: format!("{}:{}", config.host, config.port),
+                        source,
+                    }
+                })?)
+            } else {
+                None
+            };
+        self.create_ssh_session_inner(config, multiplex)
     }
 
     pub fn create_ssh_session_with_multiplex(
         &self,
-        config: SshSessionConfig,
+        mut config: SshSessionConfig,
         multiplex: SshMultiplexHandle,
     ) -> Result<SessionInfo, SessionError> {
+        config
+            .apply_runtime_policy()
+            .map_err(|message| SessionError::CreateSsh {
+                addr: format!("{}:{}", config.host, config.port),
+                source: anyhow::Error::msg(message),
+            })?;
         multiplex
             .ensure_matches_config(&config)
             .map_err(|source| SessionError::CreateSsh {
@@ -1402,9 +1426,15 @@ impl SessionManager {
 
     fn create_ssh_session_inner(
         &self,
-        config: SshSessionConfig,
+        mut config: SshSessionConfig,
         multiplex: Option<SshMultiplexHandle>,
     ) -> Result<SessionInfo, SessionError> {
+        config
+            .apply_runtime_policy()
+            .map_err(|message| SessionError::CreateSsh {
+                addr: format!("{}:{}", config.host, config.port),
+                source: anyhow::Error::msg(message),
+            })?;
         self.ensure_reaper()?;
         let mut sessions = self
             .sessions
@@ -1470,6 +1500,8 @@ impl SessionManager {
         };
         let session = SshChannelTransport {
             info: info.clone(),
+            shell_enabled: config.runtime_mode
+                != nyaterm_core::models::ssh_runtime::SshRuntimeMode::Sftp,
             attempt,
             command_tx,
             backspace_as_bs: nyaterm_core::terminal::connection_input::BackspaceMode::parse(
@@ -2031,6 +2063,9 @@ impl TerminalTransport for TelnetTransport {
 
 impl TerminalTransport for SshChannelTransport {
     fn write(&mut self, data: &[u8]) -> anyhow::Result<()> {
+        if !self.shell_enabled {
+            return Err(connection_attempt::ShellUnavailable.into());
+        }
         self.attempt.ensure_shell_available()?;
         let data = if self.backspace_as_bs {
             remap_del_to_bs(data)
@@ -2042,6 +2077,9 @@ impl TerminalTransport for SshChannelTransport {
     }
 
     fn write_raw(&mut self, data: &[u8]) -> anyhow::Result<()> {
+        if !self.shell_enabled {
+            return Err(connection_attempt::ShellUnavailable.into());
+        }
         self.attempt.ensure_shell_available()?;
         self.command_tx
             .write(data.to_vec())
@@ -2486,6 +2524,32 @@ fn run_ssh_worker(
     };
 
     runtime.block_on(async move {
+        if config.runtime_mode == nyaterm_core::models::ssh_runtime::SshRuntimeMode::Sftp {
+            let result = async {
+                let handle = multiplex.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("SFTP-only sessions require a shared SSH connection")
+                })?;
+                sftp::probe_sftp_session(&config, handle).await?;
+                Ok::<_, anyhow::Error>(())
+            }
+            .await;
+            match result {
+                Ok(()) => {
+                    let _ = ready_tx.send(Ok(()));
+                    run_sftp_only_session(
+                        &session_id,
+                        command_rx,
+                        &event_queue,
+                        multiplex.as_ref(),
+                    )
+                    .await;
+                }
+                Err(error) => {
+                    let _ = ready_tx.send(Err(error.to_string()));
+                }
+            }
+            return;
+        }
         if config.deferred_pty {
             run_deferred_ssh_worker(
                 session_id,
@@ -2508,13 +2572,32 @@ fn run_ssh_worker(
                     session
                 }
                 Err(_)
-                    if multiplex.as_ref().is_some_and(|handle| {
-                        handle.shell_availability()
-                            == connection_attempt::ShellAvailability::Unavailable
-                    }) =>
+                    if config.runtime_mode
+                        == nyaterm_core::models::ssh_runtime::SshRuntimeMode::Standard
+                        && config.remote_file_browser_enabled()
+                        && multiplex.as_ref().is_some_and(|handle| {
+                            handle.shell_availability()
+                                == connection_attempt::ShellAvailability::Unavailable
+                        }) =>
                 {
+                    if let Err(error) = sftp::probe_sftp_session(
+                        &config,
+                        multiplex.as_ref().expect("fallback has shared connection"),
+                    )
+                    .await
+                    {
+                        let _ = ready_tx.send(Err(error.to_string()));
+                        return;
+                    }
+                    config.attempt.record_shell_reply(false);
                     let _ = ready_tx.send(Ok(()));
-                    run_sftp_only_session(&session_id, command_rx, &event_queue).await;
+                    run_sftp_only_session(
+                        &session_id,
+                        command_rx,
+                        &event_queue,
+                        multiplex.as_ref(),
+                    )
+                    .await;
                     return;
                 }
                 Err(error) => {
@@ -2607,11 +2690,25 @@ async fn run_deferred_ssh_worker(
             .await;
         }
         Err(_)
-            if multiplex.as_ref().is_some_and(|handle| {
-                handle.shell_availability() == connection_attempt::ShellAvailability::Unavailable
-            }) =>
+            if config.runtime_mode
+                == nyaterm_core::models::ssh_runtime::SshRuntimeMode::Standard
+                && config.remote_file_browser_enabled()
+                && multiplex.as_ref().is_some_and(|handle| {
+                    handle.shell_availability()
+                        == connection_attempt::ShellAvailability::Unavailable
+                }) =>
         {
-            run_sftp_only_session(&session_id, command_rx, &event_queue).await;
+            if let Err(error) = sftp::probe_sftp_session(
+                &config,
+                multiplex.as_ref().expect("fallback has shared connection"),
+            )
+            .await
+            {
+                send_session_error(&event_queue, &session_id, error);
+                return;
+            }
+            config.attempt.record_shell_reply(false);
+            run_sftp_only_session(&session_id, command_rx, &event_queue, multiplex.as_ref()).await;
         }
         Err(error) => {
             send_session_error(&event_queue, &session_id, error);
@@ -2623,18 +2720,26 @@ async fn run_sftp_only_session(
     session_id: &str,
     mut commands: ssh_mailbox::Receiver,
     events: &SessionEventQueue,
+    multiplex: Option<&SshMultiplexHandle>,
 ) {
     events.push(SessionEvent::Output {
         session_id: session_id.to_owned(),
-        data:
-            b"\r\nThis server does not provide a shell. SFTP file operations remain available.\r\n"
-                .to_vec(),
+        data: b"\r\nSFTP file session ready.\r\n".to_vec(),
     });
     // The caller retains the multiplexed SSH connection. Writes queued before
     // capability detection are discarded, never replayed as shell commands.
-    while let Some(command) = commands.recv().await {
-        if matches!(command, SshCommand::Close) {
-            break;
+    loop {
+        tokio::select! {
+            command = commands.recv() => {
+                if command.is_none() || matches!(command, Some(SshCommand::Close)) { break; }
+            },
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {
+                if let Some(handle) = multiplex
+                    && (handle.is_closed() || handle.inner.target.lock().await.is_closed()) {
+                    events.push(SessionEvent::Exited { session_id: session_id.to_owned(), reason: "SSH connection closed".into() });
+                    break;
+                }
+            }
         }
     }
 }
@@ -3201,6 +3306,7 @@ async fn open_ssh_shell_from_pending(
     if let Err(error) = shell_reply {
         if matches!(error, russh::Error::RequestDenied) {
             attempt.record_shell_reply(false);
+            config.attempt.record_shell_reply(false);
         }
         if let Some(multiplex) = x11_multiplex_registration.as_ref() {
             multiplex.unregister_x11_sender(session_id).await;
@@ -3209,6 +3315,7 @@ async fn open_ssh_shell_from_pending(
         return Err(error.into());
     }
     attempt.record_shell_reply(true);
+    config.attempt.record_shell_reply(true);
     if !early_output.is_empty() {
         local_notice
             .get_or_insert_with(Vec::new)
@@ -4021,6 +4128,9 @@ impl client::Handler for SshClientHandler {
 fn effective_agent_forwarding_config(
     config: &SshSessionConfig,
 ) -> Option<SshAgentForwardingConfig> {
+    if config.runtime_mode == nyaterm_core::models::ssh_runtime::SshRuntimeMode::Sftp {
+        return None;
+    }
     config.agent_forwarding_config.clone().or_else(|| {
         config.agent_forwarding.then(|| SshAgentForwardingConfig {
             enabled: true,

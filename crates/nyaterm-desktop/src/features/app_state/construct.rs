@@ -381,6 +381,7 @@ impl NyaTermApp {
                 state.operations = sync_operations;
                 state
             },
+            activation: Default::default(),
             session: SessionFeatureState::new(
                 session_manager,
                 ssh_connections,

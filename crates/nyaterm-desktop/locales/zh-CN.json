@@ -3955,5 +3955,12 @@
   "input": {
     "showSecret": "显示内容",
     "hideSecret": "隐藏内容"
+  },
+  "externalOpen": {
+    "queueFull": "外部连接请求过多，请稍后重试。",
+    "invalidUrl": "外部连接请求被拒绝：参数无效或不受支持。",
+    "matchTitle": "选择连接",
+    "matchDescription": "找到多个匹配的已保存连接，请选择一个或打开临时连接。",
+    "useTemporary": "打开临时连接"
   }
 }

@@ -136,6 +136,9 @@ impl NyaTermApp {
         if self.remote_desktop.is_session(&session_id) {
             return self.remote_desktop_view(session_id, cx);
         }
+        if self.session_is_sftp_only(&session_id) {
+            return self.sftp_session_content(&session_id);
+        }
         self.terminal_canvas_for(session_id, cx).into_any_element()
     }
 
@@ -161,7 +164,7 @@ impl NyaTermApp {
                         this.activate_workspace_pane(focus_id.clone(), cx);
                         if this.remote_desktop.is_session(&focus_id) {
                             window.focus(this.remote_desktop.focus(), cx);
-                        } else {
+                        } else if !this.session_is_sftp_only(&focus_id) {
                             window.focus(this.terminal.input_focus(), cx);
                         }
                         cx.notify();

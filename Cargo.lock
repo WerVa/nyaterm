@@ -6453,6 +6453,7 @@ dependencies = [
  "tracing-subscriber",
  "usvg 0.46.0",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

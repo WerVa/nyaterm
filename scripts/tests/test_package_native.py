@@ -128,7 +128,7 @@ class PackageNativeTests(unittest.TestCase):
                 self.assertEqual(plist["CFBundleDisplayName"], identity.display_name)
                 self.assertEqual(plist["CFBundleName"], identity.display_name)
                 self.assertEqual(plist["CFBundleIdentifier"], identity.macos_identifier)
-                self.assertEqual(plist["CFBundleURLTypes"][0]["CFBundleURLSchemes"], [identity.desktop_id])
+                self.assertEqual(plist["CFBundleURLTypes"][0]["CFBundleURLSchemes"], list(identity.url_schemes))
                 self.assertTrue((root / "work" / "dmg" / identity.macos_bundle_name).is_dir())
                 self.assertEqual((root / "work" / "dmg" / "Applications").readlink().as_posix(), "/Applications")
                 archive = next((root / "dist").glob("*.tar.gz"))
@@ -353,18 +353,18 @@ class PackageNativeTests(unittest.TestCase):
             r'DeleteRegKey HKCU "Software\Classes\nyaterm"',
             script,
         )
-        self.assertNotIn(r"Software\Classes\ssh", script)
-        self.assertNotIn(r"Software\Classes\telnet", script)
+        for scheme in ("nyaterm", "ssh", "telnet"):
+            self.assertIn(f'ReadRegStr $0 HKCU "Software\\Classes\\{scheme}\\shell\\open\\command" ""', script)
+            self.assertIn(f'DeleteRegKey HKCU "Software\\Classes\\{scheme}"', script)
+        self.assertIn('StrCmp $0', script)
 
-    def test_linux_desktop_registers_only_nyaterm_url_scheme(self) -> None:
+    def test_linux_desktop_registers_stable_protocols(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "nyaterm.desktop"
             package_native.write_desktop_file(path, "/opt/nyaterm/nyaterm")
             desktop = path.read_text(encoding="utf-8")
         self.assertIn("Exec=/opt/nyaterm/nyaterm %U\n", desktop)
-        self.assertIn("MimeType=x-scheme-handler/nyaterm;\n", desktop)
-        self.assertNotIn("x-scheme-handler/ssh", desktop)
-        self.assertNotIn("x-scheme-handler/telnet", desktop)
+        self.assertIn("MimeType=x-scheme-handler/nyaterm;x-scheme-handler/ssh;x-scheme-handler/telnet;\n", desktop)
 
     def test_deb_dependencies_cover_helper_binaries(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

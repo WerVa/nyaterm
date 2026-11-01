@@ -105,6 +105,7 @@ pub struct DesktopController {
     screen_locked: bool,
     most_recent_workspace_id: Option<WorkspaceId>,
     recent_activations: RecentActivationCache,
+    recent_connections: nyaterm_core::activation::RecentConnectionRequests,
     closing_workspaces: HashSet<WorkspaceId>,
     process_quitting: bool,
     pending_bootstrap: Option<StoreTask<BootstrapSnapshot>>,
@@ -144,6 +145,7 @@ impl DesktopController {
             tray: None,
             screen_locked: false,
             recent_activations: RecentActivationCache::default(),
+            recent_connections: Default::default(),
             closing_workspaces: HashSet::new(),
             process_quitting: false,
             pending_bootstrap,
@@ -172,6 +174,10 @@ impl DesktopController {
             let startup = self.startup.for_workspace(workspace_id);
             self.open_workspace_with_startup(startup, None, false, None, cx)?;
         }
+        self.recent_activations
+            .remember(initial_activation.request_id);
+        let mut initial_activation = initial_activation.parse();
+        self.deduplicate_connections(&mut initial_activation);
         let _ = self.activate_and_deliver(self.most_recent_workspace_id, initial_activation, cx);
         self.launch_initial_bootstrap(cx);
         if let Some(recent) = self.most_recent_workspace_id

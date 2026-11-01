@@ -3961,5 +3961,12 @@
   "input": {
     "showSecret": "内容を表示",
     "hideSecret": "内容を非表示"
+  },
+  "externalOpen": {
+    "queueFull": "外部接続リクエストが多すぎます。後で再試行してください。",
+    "invalidUrl": "外部接続リクエストが拒否されました。パラメーターが無効か未対応です。",
+    "matchTitle": "接続を選択",
+    "matchDescription": "一致する保存済み接続が複数あります。接続を選ぶか一時接続を開いてください。",
+    "useTemporary": "一時接続を開く"
   }
 }

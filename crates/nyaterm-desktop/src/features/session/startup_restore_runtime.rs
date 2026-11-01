@@ -175,7 +175,10 @@ impl NyaTermApp {
     pub(in crate::features) fn serialize_open_tabs(&self) -> Vec<RestorableOpenTab> {
         // Prefer a single Tauri-style open_tabs entry when one pane tree covers every session.
         if let Some(tabs) = self.serialize_open_tabs_as_single_pane_tab() {
-            return tabs;
+            return tabs
+                .into_iter()
+                .chain(self.session.unsupported_restore_tabs.clone())
+                .collect();
         }
 
         // One strip tab per tab-root; attach RestorablePaneNode when that tab is split.
@@ -192,6 +195,7 @@ impl NyaTermApp {
                 }
                 tab
             })
+            .chain(self.session.unsupported_restore_tabs.clone())
             .collect()
     }
 
@@ -220,6 +224,15 @@ impl NyaTermApp {
             custom_name,
             tab_color,
         );
+        tab.ssh_runtime_mode = metadata
+            .and_then(|meta| meta.ssh_config.as_ref())
+            .map(|config| config.effective_runtime_mode().as_str().to_string());
+        if let Some(RestorablePaneNode::Leaf {
+            ssh_runtime_mode, ..
+        }) = tab.root.as_mut()
+        {
+            *ssh_runtime_mode = tab.ssh_runtime_mode.clone();
+        }
         tab.locked = self.tab_tree_is_locked(&session.id);
         tab
     }
@@ -283,6 +296,7 @@ impl NyaTermApp {
                 let tab = self.serialize_open_tab_for_session(&session);
                 // Use runtime session id as RestorablePane leaf id so active_pane_id roundtrips.
                 Some(RestorablePaneNode::Leaf {
+                    ssh_runtime_mode: tab.ssh_runtime_mode,
                     id: session_id.clone(),
                     title: tab.title,
                     session_type: tab.session_type,
@@ -380,6 +394,13 @@ impl NyaTermApp {
         let mut expanded = Vec::new();
         let mut base_index = 0usize;
         for tab in &tabs {
+            if !tab.ssh_runtime_modes_supported() {
+                // Global layout indexes still refer to the skipped tab. Keep the
+                // original manifest intact rather than remapping it incorrectly.
+                self.shell.preserve_unread_terminal_layout();
+                self.session.unsupported_restore_tabs.push(tab.clone());
+                continue;
+            }
             if let Some(layout) = tab.workspace_pane_layout_from_root(base_index) {
                 pending_pane_layouts.push(layout);
             }
@@ -396,6 +417,7 @@ impl NyaTermApp {
             base_index += sessions.len();
             for session in sessions {
                 expanded.push(RestorableOpenTab {
+                    ssh_runtime_mode: session.ssh_runtime_mode,
                     title: session.title,
                     session_type: session.session_type,
                     connection_id: session.connection_id,
@@ -703,6 +725,10 @@ impl NyaTermApp {
             self.continue_saved_connection_start(
                 connection,
                 SavedConnectionStartOptions {
+                    ssh_runtime_mode: tab
+                        .ssh_runtime_mode
+                        .as_deref()
+                        .and_then(nyaterm_core::models::ssh_runtime::SshRuntimeMode::parse),
                     custom_name,
                     tab_color,
                     locked: tab.locked,

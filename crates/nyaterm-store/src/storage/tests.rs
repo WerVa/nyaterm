@@ -4311,6 +4311,7 @@ fn workspace_pane_layout_roundtrip() {
 #[test]
 fn open_tab_pane_root_expands_and_maps_layout() {
     let tab = nyaterm_core::models::RestorableOpenTab {
+        ssh_runtime_mode: None,
         title: "split".to_string(),
         session_type: "SSH".to_string(),
         connection_id: Some("c1".to_string()),
@@ -4374,6 +4375,7 @@ fn open_tabs_roundtrip() {
             Some("#22c55e".to_string()),
         ),
         nyaterm_core::models::RestorableOpenTab {
+            ssh_runtime_mode: None,
             title: "prod".to_string(),
             session_type: "SSH".to_string(),
             connection_id: Some("conn-1".to_string()),
@@ -4403,6 +4405,36 @@ fn open_tabs_roundtrip() {
     assert_eq!(loaded, tabs);
     store.save_open_tabs(&[]).expect("clear");
     assert!(store.load_open_tabs().expect("load empty").is_empty());
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn open_tabs_preserve_legacy_and_tauri_ssh_modes_in_the_existing_document() {
+    let dir = unique_temp_dir("open-tabs-ssh-modes");
+    let store = ConnectionStore::open(&dir).unwrap();
+    let tabs: Vec<nyaterm_core::models::RestorableOpenTab> = serde_json::from_value(serde_json::json!([
+        {"title":"legacy", "session_type":"SSH", "connection_id":"saved"},
+        {"title":"Tauri split", "session_type":"SSH", "ssh_runtime_mode":"standard", "root":{
+            "kind":"split", "id":"split", "direction":"vertical", "ratio":0.5,
+            "first":{"kind":"leaf", "id":"a", "session_type":"SSH", "connection_id":"a", "ssh_runtime_mode":"sftp"},
+            "second":{"kind":"leaf", "id":"b", "session_type":"SSH", "connection_id":"b", "ssh_runtime_mode":"future-mode"}
+        }}
+    ])).unwrap();
+    store.save_open_tabs(&tabs).unwrap();
+    let restored = store.load_open_tabs().unwrap();
+    assert_eq!(restored, tabs);
+    assert!(restored[0].ssh_runtime_modes_supported());
+    assert!(!restored[1].ssh_runtime_modes_supported());
+    assert_eq!(
+        restored[1].expanded_sessions()[1]
+            .ssh_runtime_mode
+            .as_deref(),
+        Some("future-mode")
+    );
+    drop(store);
+    let reopened = ConnectionStore::open(&dir).unwrap();
+    assert_eq!(reopened.load_open_tabs().unwrap(), tabs);
+    drop(reopened);
     std::fs::remove_dir_all(dir).ok();
 }
 

@@ -336,6 +336,7 @@ impl NyaTermApp {
         self.session.start.clear_reconnect_failure(session_id);
         // If this leaf was a tab root, drop its pane tree (prune will rekey survivors).
         self.shell.remove_workspace_session(session_id);
+        self.file_manager.remove_sftp_session(session_id);
         self.session.remove_session_catalog(session_id);
         self.session.clear_event_bridge_session(session_id);
         self.terminal.remove_frame_session(session_id);

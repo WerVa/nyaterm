@@ -112,6 +112,7 @@ pub struct NyaTermApp {
     pub(in crate::features) update: gpui::Entity<super::update::UpdateStore>,
     pub(in crate::features) cloud_sync: CloudSyncFeatureState,
     pub(in crate::features) session: SessionFeatureState,
+    pub(in crate::features) activation: super::activation::ActivationFeatureState,
     pub(in crate::features) shell: ShellFeatureState,
     pub(in crate::features) sync_input: SyncInputFeatureState,
     pub(in crate::features) recording: RecordingFeatureState,

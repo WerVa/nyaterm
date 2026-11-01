@@ -5,6 +5,7 @@ pub mod notes;
 pub mod quick_commands;
 pub mod sessions;
 pub mod settings;
+pub mod ssh_runtime;
 pub mod ssh_runtime_auth;
 pub mod window_decoration;
 pub mod window_material;

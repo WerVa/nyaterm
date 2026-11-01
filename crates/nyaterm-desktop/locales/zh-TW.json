@@ -3962,5 +3962,12 @@
   "input": {
     "showSecret": "顯示內容",
     "hideSecret": "隱藏內容"
+  },
+  "externalOpen": {
+    "queueFull": "外部連線請求過多，請稍後重試。",
+    "invalidUrl": "外部連線請求遭拒：參數無效或不受支援。",
+    "matchTitle": "選擇連線",
+    "matchDescription": "找到多個符合的已儲存連線，請選擇一個或開啟臨時連線。",
+    "useTemporary": "開啟臨時連線"
   }
 }

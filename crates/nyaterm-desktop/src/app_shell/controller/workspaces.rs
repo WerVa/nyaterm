@@ -20,6 +20,7 @@ use nyaterm_core::AppSettingsSummary;
 use nyaterm_core::OpenWorkspaceRequest;
 use nyaterm_core::WorkspaceId;
 use nyaterm_core::WorkspaceUiState;
+use nyaterm_core::activation::ParsedActivationRequest;
 use nyaterm_ui::nya_root;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -119,7 +120,7 @@ impl DesktopController {
     pub(super) fn open_workspace_with_startup(
         &mut self,
         startup: AppShellStartup,
-        initial_activation: Option<ActivationRequest>,
+        initial_activation: Option<ParsedActivationRequest>,
         activate: bool,
         placement_override: Option<MainWindowPlacement>,
         cx: &mut Context<Self>,
@@ -210,10 +211,28 @@ impl DesktopController {
         if !self.recent_activations.remember(request.request_id) {
             return;
         }
-        if request.open_behavior() == ActivationOpenBehavior::ReuseMostRecent
-            && self.activate_and_deliver(self.most_recent_workspace_id, request.clone(), cx)
-        {
+        let mut request = request.parse();
+        self.deduplicate_connections(&mut request);
+        if request.actions.is_empty() {
             return;
+        }
+        if request.open_behavior == ActivationOpenBehavior::ReuseMostRecent {
+            let target = self
+                .most_recent_workspace_id
+                .filter(|id| self.windows.contains_key(id) && !self.closing_workspaces.contains(id))
+                .or_else(|| {
+                    self.device_windows
+                        .window_order
+                        .iter()
+                        .rev()
+                        .find(|id| {
+                            self.windows.contains_key(id) && !self.closing_workspaces.contains(id)
+                        })
+                        .copied()
+                });
+            if self.activate_and_deliver(target, request.clone(), cx) {
+                return;
+            }
         }
         if let Err(error) = self.open_workspace(
             OpenWorkspaceRequest {
@@ -226,22 +245,36 @@ impl DesktopController {
         }
     }
 
+    pub(super) fn deduplicate_connections(&mut self, request: &mut ParsedActivationRequest) {
+        let now = std::time::Instant::now();
+        request.actions.retain(|action| match action {
+            Ok(nyaterm_core::activation::ActivationAction::Connect(connection)) => {
+                self.recent_connections.remember(connection, now)
+            }
+            _ => true,
+        });
+    }
+
     pub(super) fn activate_and_deliver(
         &mut self,
         workspace_id: Option<WorkspaceId>,
-        request: ActivationRequest,
+        request: ParsedActivationRequest,
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(workspace_id) = workspace_id else {
             return false;
         };
+        if self.closing_workspaces.contains(&workspace_id) {
+            return false;
+        }
         let Some(entry) = self.windows.get(&workspace_id) else {
             return false;
         };
         if entry
             .shell
             .update(cx, |shell, cx| shell.receive_activation_direct(request, cx))
-            .is_err()
+            .ok()
+            != Some(true)
         {
             return false;
         }

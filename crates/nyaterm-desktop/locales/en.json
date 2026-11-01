@@ -3955,5 +3955,12 @@
   "input": {
     "showSecret": "Show value",
     "hideSecret": "Hide value"
+  },
+  "externalOpen": {
+    "queueFull": "Too many external connection requests. Try again later.",
+    "invalidUrl": "An external connection request was rejected: invalid or unsupported parameters.",
+    "matchTitle": "Choose a connection",
+    "matchDescription": "Several saved connections match. Choose one or open a temporary connection.",
+    "useTemporary": "Open temporary connection"
   }
 }

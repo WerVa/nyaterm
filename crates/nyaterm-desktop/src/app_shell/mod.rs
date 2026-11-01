@@ -1,5 +1,7 @@
 //! Root GPUI shell boundary.
 
+use nyaterm_core::activation::ParsedActivationRequest;
+
 mod controller;
 pub(crate) use controller::native_menu;
 mod process_state;
@@ -27,8 +29,8 @@ use gpui::{
     actions, div, prelude::FluentBuilder, px, rgb, svg,
 };
 use nyaterm_core::{
-    ActivationRequest, AppRuntime, DiagnosticsExportOptions, DiagnosticsRuntimeSnapshot,
-    WorkspaceId, export_diagnostics_archive,
+    AppRuntime, DiagnosticsExportOptions, DiagnosticsRuntimeSnapshot, WorkspaceId,
+    export_diagnostics_archive,
 };
 use nyaterm_store::{FlushBarrier, StoreOperationError, StoreRuntime, StoreSubmitError, StoreTask};
 use nyaterm_ui::{NyaAppMenu, NyaAppMenuBar, NyaButton, NyaButtonVariant};
@@ -80,7 +82,7 @@ pub struct AppShell {
     workspace_seed: Option<nyaterm_core::WorkspaceRestoreState>,
     startup_restore: Entity<StartupRestoreStore>,
     overlays: Entity<OverlayStore>,
-    pending_activations: VecDeque<ActivationRequest>,
+    pending_activations: VecDeque<ParsedActivationRequest>,
     pending_process_quit_tasks: Vec<StoreTask<()>>,
     main_window_state: MainWindowStateController,
     _subscriptions: Vec<Subscription>,
@@ -103,7 +105,7 @@ struct RecoveryState {
 impl AppShell {
     pub fn new(
         runtime: AppRuntime,
-        initial_activation: Option<ActivationRequest>,
+        initial_activation: Option<ParsedActivationRequest>,
         startup: AppShellStartup,
         workspace_id: WorkspaceId,
         controller: Entity<DesktopController>,
@@ -226,16 +228,22 @@ impl AppShell {
 
     pub(super) fn receive_activation_direct(
         &mut self,
-        request: ActivationRequest,
+        request: ParsedActivationRequest,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
+        if matches!(self.lifecycle, AppShellLifecycle::Flushing) {
+            return false;
+        }
         if matches!(self.lifecycle, AppShellLifecycle::Ready) {
             if let Some(app) = &self.app {
                 app.update(cx, |app, cx| app.handle_activation(request, cx));
+                return true;
             }
-        } else if !matches!(self.lifecycle, AppShellLifecycle::Flushing) {
+        } else {
             self.pending_activations.push_back(request);
+            return true;
         }
+        false
     }
 
     fn drain_pending_activations(&mut self, cx: &mut Context<Self>) {
@@ -694,6 +702,10 @@ impl AppShell {
     }
 
     fn enter_flushing(&mut self, cx: &mut Context<Self>) {
+        self.pending_activations.clear();
+        if let Some(app) = &self.app {
+            app.update(cx, |app, _| app.cancel_external_activations());
+        }
         if matches!(self.lifecycle, AppShellLifecycle::Flushing) {
             return;
         }

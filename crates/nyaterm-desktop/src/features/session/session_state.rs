@@ -309,6 +309,10 @@ impl NyaTermApp {
         session_id: &str,
         cx: &mut Context<Self>,
     ) -> Option<String> {
+        self.ensure_sftp_session_view(session_id, cx);
+        if let Some(view) = self.file_manager.workspace(&format!("sftp-{session_id}")) {
+            view.update(cx, |view, cx| view.request_focus(cx));
+        }
         self.session.start.clear_active_selection();
         self.shell.prepare_session_switch();
         // Session switch resets terminal-output credential autofill (Tauri XTerminal remount).
