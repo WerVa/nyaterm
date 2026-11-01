@@ -589,10 +589,14 @@ impl NyaTermApp {
             motion,
             modifiers,
         } = report;
+        let allowed_peers = self.sync_peer_session_ids(session_id);
         let result = self.write_mouse_report_to_session(report, cx);
         if !press && self.terminal.selection.mouse_report_button.is_some() {
             let peers = std::mem::take(&mut self.terminal.selection.mouse_report_peer_session_ids);
             for peer_id in peers {
+                if !allowed_peers.contains(&peer_id) {
+                    continue;
+                }
                 let _ = self.write_mouse_report_to_session(
                     TerminalMouseReportRequest {
                         session_id: &peer_id,
@@ -623,6 +627,9 @@ impl NyaTermApp {
                 .mouse_report_peer_session_ids
                 .clone();
             for peer_id in peers {
+                if !allowed_peers.contains(&peer_id) {
+                    continue;
+                }
                 let _ = self.write_mouse_report_to_session(
                     TerminalMouseReportRequest {
                         session_id: &peer_id,

@@ -21,6 +21,7 @@ struct QuickCommandSendPlan {
 
 struct StagedQuickCommandTarget {
     session_id: String,
+    source_session_id: Option<String>,
     history: StagedCommandHistory,
 }
 
@@ -322,7 +323,7 @@ impl NyaTermApp {
                 .session
                 .ordered_sessions()
                 .into_iter()
-                .filter(|session| !self.session.is_disconnected(&session.id))
+                .filter(|session| self.sync_target_allowed(&session.id))
                 .collect::<Vec<_>>();
             if sessions.is_empty() {
                 self.shell.set_status(
@@ -390,18 +391,20 @@ impl NyaTermApp {
         if !send_to_all && self.active_terminal_input_blocked() {
             return;
         }
+        let source_session_id = (!send_to_all)
+            .then(|| self.session.active_id_owned())
+            .flatten();
         let targets = if send_to_all {
             self.session
                 .ordered_sessions()
                 .into_iter()
-                .filter(|session| !self.session.is_disconnected(&session.id))
+                .filter(|session| self.sync_target_allowed(&session.id))
                 .map(|session| session.id)
                 .collect::<Vec<_>>()
         } else {
-            let primary = self
-                .session
-                .active_id_owned()
-                .filter(|session_id| !self.session.is_disconnected(session_id));
+            let primary = self.session.active_id_owned().filter(|session_id| {
+                !self.session.is_disconnected(session_id) && self.terminal_sync_session(session_id)
+            });
             match primary {
                 Some(session_id) => {
                     let peers = self.sync_peer_session_ids(&session_id);
@@ -418,9 +421,15 @@ impl NyaTermApp {
         }
 
         let run_id = self.commands.staged.begin(&targets);
+        for id in &targets {
+            if source_session_id.as_deref() != Some(id.as_str()) {
+                self.commands.staged.mark_receiver(id, run_id);
+            }
+        }
         let targets = targets
             .into_iter()
             .map(|session_id| StagedQuickCommandTarget {
+                source_session_id: source_session_id.clone(),
                 session_id,
                 history: StagedCommandHistory::default(),
             })
@@ -490,6 +499,16 @@ impl NyaTermApp {
         for mut target in targets {
             let session_id = &target.session_id;
             if !self.commands.staged.owns(session_id, run_id) {
+                cancelled = true;
+                continue;
+            }
+            let allowed = match target.source_session_id.as_deref() {
+                Some(source) if source == session_id => self.terminal_sync_session(session_id),
+                Some(source) => self.sync_peer_session_ids(source).contains(session_id),
+                None => self.sync_target_allowed(session_id),
+            };
+            if !allowed {
+                self.commands.staged.finish(session_id, run_id);
                 cancelled = true;
                 continue;
             }
