@@ -129,6 +129,9 @@
     "proxyPort": "Proxy port",
     "proxyProtocol": "Proxy protocol",
     "harness": {
+      "approvalTitle": "承認待ち",
+      "allowRun": "今回の実行で許可",
+      "allowRunDescription": "この Agent 実行中、同じツール・対象・パラメーターの操作にのみ適用します。",
       "plan": "タスク計画",
       "waitingForUser": "回答を待っています",
       "answerPlaceholder": "自由に回答…",

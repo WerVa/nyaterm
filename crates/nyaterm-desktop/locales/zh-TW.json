@@ -129,6 +129,9 @@
     "proxyPort": "代理端口",
     "proxyProtocol": "代理协议",
     "harness": {
+      "approvalTitle": "等待授權",
+      "allowRun": "本次執行內允許",
+      "allowRunDescription": "僅適用於本次 Agent 執行中工具、目標和參數相同的操作。",
       "plan": "任務計畫",
       "waitingForUser": "等待你的回答",
       "answerPlaceholder": "自由文字回答…",

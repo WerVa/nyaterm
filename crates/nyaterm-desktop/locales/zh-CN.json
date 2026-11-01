@@ -501,6 +501,9 @@
     "providerNameRequired": "请输入供应商名称",
     "providerEndpointInvalid": "请输入有效的 HTTP 或 HTTPS 接口地址",
     "harness": {
+      "approvalTitle": "等待授权",
+      "allowRun": "本次运行内允许",
+      "allowRunDescription": "仅对本次 Agent 运行中工具、目标和参数相同的操作生效。",
       "plan": "任务计划",
       "waitingForUser": "等待你的回答",
       "submitAnswers": "继续",

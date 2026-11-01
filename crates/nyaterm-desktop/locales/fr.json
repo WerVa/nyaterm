@@ -129,6 +129,9 @@
     "proxyPort": "Proxy port",
     "proxyProtocol": "Proxy protocol",
     "harness": {
+      "approvalTitle": "En attente d’autorisation",
+      "allowRun": "Autoriser pour cette exécution",
+      "allowRunDescription": "Uniquement pour les mêmes outil, cible et paramètres pendant cette exécution de l’Agent.",
       "plan": "Plan de tâche",
       "waitingForUser": "En attente de vos réponses",
       "answerPlaceholder": "Réponse libre…",

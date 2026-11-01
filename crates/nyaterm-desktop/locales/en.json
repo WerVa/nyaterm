@@ -501,6 +501,9 @@
     "providerNameRequired": "Provider name is required",
     "providerEndpointInvalid": "Use a valid HTTP or HTTPS endpoint",
     "harness": {
+      "approvalTitle": "Waiting for authorization",
+      "allowRun": "Allow for this run",
+      "allowRunDescription": "Only applies to the same tool, target and parameters during this Agent run.",
       "plan": "Task plan",
       "waitingForUser": "Waiting for your answers",
       "submitAnswers": "Continue",
