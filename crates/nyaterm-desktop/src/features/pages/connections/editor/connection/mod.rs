@@ -3770,6 +3770,94 @@ mod tests {
     }
 
     #[gpui::test]
+    fn post_login_editor_preserves_edits_across_navigation_and_saves_only_with_shortcut(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::features::connections::ConnectionEditorToggle;
+        use crate::models::ConnectionEditorSection;
+
+        let test_dir = TestConfigDir::new("nyaterm-post-login-editor");
+        let (app, vcx) = hosted_editor(cx, test_dir.path(), 640., 720., 12.);
+        vcx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                let mut draft = editor(None, None);
+                draft.post_login_enabled = true;
+                draft.post_login_command = "echo hello".into();
+                app.connection_state.begin_editor(draft);
+                app.connection_state.build_editor_fields(cx);
+                app.set_connection_editor_section(ConnectionEditorSection::PostLogin, cx);
+            });
+        });
+        draw_editor(&app, vcx);
+        assert_eq!(
+            vcx.debug_bounds("connection-editor-post-login-command")
+                .unwrap()
+                .size
+                .height,
+            px(168.)
+        );
+        let input = vcx.update(|window, cx| {
+            let input = app.read(cx).connection_state.editor_fields()
+                [&ConnectionEditorField::PostLoginCommand]
+                .clone();
+            input.update(cx, |input, cx| input.focus_with_cursor_at_end(window, cx));
+            input
+        });
+        vcx.simulate_keystrokes("enter shift-enter");
+        draw_editor(&app, vcx);
+        vcx.update(|_, cx| {
+            let draft = app.read(cx).connection_state.active_editor_draft().unwrap();
+            assert_eq!(draft.section, ConnectionEditorSection::PostLogin);
+            assert!(draft.field_errors.is_empty());
+            assert_eq!(draft.post_login_command, "echo hello\n\n");
+        });
+        for section in [
+            ConnectionEditorSection::Basic,
+            ConnectionEditorSection::PostLogin,
+        ] {
+            vcx.update(|_, cx| {
+                app.update(cx, |app, cx| app.set_connection_editor_section(section, cx))
+            });
+            draw_editor(&app, vcx);
+        }
+        for _ in 0..2 {
+            vcx.update(|_, cx| {
+                app.update(cx, |app, cx| {
+                    app.toggle_connection_editor_flag(ConnectionEditorToggle::PostLogin, cx)
+                })
+            });
+            draw_editor(&app, vcx);
+        }
+        vcx.update(|window, cx| {
+            assert_eq!(
+                input.entity_id(),
+                app.read(cx).connection_state.editor_fields()
+                    [&ConnectionEditorField::PostLoginCommand]
+                    .entity_id()
+            );
+            assert_eq!(input.read(cx).value(cx), "echo hello\n\n");
+            input.update(cx, |input, cx| input.focus_with_cursor_at_end(window, cx));
+        });
+        vcx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-enter"
+        } else {
+            "ctrl-enter"
+        });
+        draw_editor(&app, vcx);
+        vcx.update(|_, cx| {
+            let draft = app.read(cx).connection_state.active_editor_draft().unwrap();
+            assert_eq!(draft.post_login_command, "echo hello\n\n");
+            assert!(
+                draft
+                    .field_errors
+                    .contains_key(&ConnectionEditorField::Host),
+                "save must validate the connection"
+            );
+            assert_eq!(draft.section, ConnectionEditorSection::Basic);
+        });
+    }
+
+    #[gpui::test]
     fn connection_editor_enter_creates_inline_tags_and_keeps_input_focus(cx: &mut TestAppContext) {
         let test_dir = TestConfigDir::new("nyaterm-connection-inline-tags");
         let (app, vcx) = hosted_editor(cx, test_dir.path(), 640., 720., 12.);

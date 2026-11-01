@@ -21,8 +21,8 @@ use crate::models::{
     ConnectionGroupEditorState, ConnectionSortMode,
 };
 use nyaterm_ui::{
-    NYA_FORM_CONTROL_HEIGHT_PX, NyaInput, NyaInputState, NyaNumberInput, NyaNumberInputState,
-    NyaSelect, NyaSelectState, NyaSwitch,
+    NYA_FORM_CONTROL_HEIGHT_PX, NyaInput, NyaInputShell, NyaInputState, NyaNumberInput,
+    NyaNumberInputState, NyaSelect, NyaSelectState, NyaSwitch,
 };
 
 #[derive(Clone)]
@@ -1213,7 +1213,7 @@ pub(super) fn editor_field(
     label: impl Into<FieldLabel>,
     field: ConnectionEditorField,
     fields: &ConnectionEditorFields,
-    cx: &App,
+    cx: &Context<NyaTermApp>,
 ) -> impl IntoElement {
     let label = label.into();
     div()
@@ -1349,22 +1349,34 @@ pub(super) fn editor_field_box(
     palette: crate::theme::ThemePalette,
     field: ConnectionEditorField,
     fields: &ConnectionEditorFields,
-    cx: &App,
+    cx: &Context<NyaTermApp>,
 ) -> impl IntoElement {
     let entity = fields.get(&field);
+    if field == ConnectionEditorField::PostLoginCommand {
+        let app = cx.weak_entity();
+        return div()
+            .w_full()
+            .min_w_0()
+            .flex_none()
+            .children(entity.map(|field| {
+                NyaInputShell::new("connection-editor-post-login-command", field)
+                    .multi_line()
+                    .height(px(168.))
+                    .tab_navigation()
+                    .on_secondary_enter(move |window, cx| {
+                        let _ = app.update(cx, |app, cx| app.save_connection_editor(window, cx));
+                    })
+            }))
+            .into_any_element();
+    }
     let handle = entity.map(|field| field.read(cx).focus_handle());
     let focused = entity.is_some_and(|field| field.read(cx).has_focus());
     div()
-        .h(px(
-            if matches!(
-                field,
-                ConnectionEditorField::Description | ConnectionEditorField::PostLoginCommand
-            ) {
-                112.
-            } else {
-                EDITOR_CONTROL_HEIGHT_PX
-            },
-        ))
+        .h(px(if field == ConnectionEditorField::Description {
+            112.
+        } else {
+            EDITOR_CONTROL_HEIGHT_PX
+        }))
         .id("connection-list-search-input-shell")
         .min_w_0()
         .px(px(ORDINARY_INPUT_SHELL_PADDING_X_PX))
@@ -1391,6 +1403,7 @@ pub(super) fn editor_field_box(
                 .text_color(rgb(palette.text))
                 .child(NyaInput::new(field))
         }))
+        .into_any_element()
 }
 
 /// A numeric field backed by gpui-kit's spinner control.

@@ -1023,6 +1023,19 @@ impl NyaTermApp {
                 {
                     return true;
                 }
+                if let Some(input) = self
+                    .connection_state
+                    .editor_fields()
+                    .get(&ConnectionEditorField::PostLoginCommand)
+                    .cloned()
+                    .filter(|input| input.read(cx).component_focus_handle(cx).is_focused(window))
+                    && (input.update(cx, |input, cx| input.is_composing(window, cx))
+                        || (!keystroke.modifiers.platform && !keystroke.modifiers.control))
+                {
+                    // The script editor owns newlines and IME confirmation;
+                    // only the explicit save shortcut may submit this field.
+                    return false;
+                }
                 if !keystroke.modifiers.platform
                     && !keystroke.modifiers.control
                     && self.connection_state.editor_tag_field_is_focused(cx)
