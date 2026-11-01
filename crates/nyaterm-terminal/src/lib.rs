@@ -2593,9 +2593,11 @@ fn snapshot_row_from_term(
     } = metadata;
     let mut hyperlink_intern = HashMap::new();
     let cells = if let Some(line) = line {
+        // Index the grid once per row, not once per cell.
+        let grid_row = &term.grid()[line];
         (0..cols)
             .map(|col| {
-                let cell = &term.grid()[line][Column(col)];
+                let cell = &grid_row[Column(col)];
                 RenderCell {
                     text: cell_text(cell),
                     style: cell_style(cell),
