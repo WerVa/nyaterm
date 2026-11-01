@@ -19,6 +19,7 @@ from pathlib import Path
 
 import prepare_conpty
 import windows_msi
+import windows_portable
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -32,9 +33,7 @@ APP_BIN = "nyaterm"
 # Helper processes the application spawns at runtime. `resolve_helper_path()`
 # in nyaterm-remote-desktop only looks beside the running executable, so each
 # supported helper must be packaged next to the application binary.
-HELPER_BINS = (
-    "nyaterm-rdp-helper", "nyaterm-vnc-helper", "nyaterm-mcp", "nyaterm-activex-helper"
-)
+HELPER_BINS = tuple(Path(name).stem for name in windows_portable.LAYOUT["helper_files"])
 CONPTY_LICENSE = Path(__file__).with_name("conpty-license.txt")
 
 
@@ -46,11 +45,12 @@ def helper_bins(target: str) -> tuple[str, ...]:
 
 
 def conpty_files(target: str) -> tuple[Path, ...]:
-    if target == "x86_64-pc-windows-msvc":
-        return (Path("x64/conpty.dll"), Path("x64/x64/OpenConsole.exe"), Path("x64/arm64/OpenConsole.exe"))
-    if target == "aarch64-pc-windows-msvc":
-        return (Path("arm64/conpty.dll"), Path("arm64/arm64/OpenConsole.exe"))
-    raise ValueError(f"ConPTY is only packaged for Windows targets: {target}")
+    if target not in windows_portable.LAYOUT["conpty_files"]:
+        raise ValueError(f"ConPTY is only packaged for Windows targets: {target}")
+    return tuple(
+        Path(name).relative_to("conpty")
+        for name in windows_portable.LAYOUT["conpty_files"][target]
+    )
 
 
 def copy_conpty(destination: Path, target: str) -> list[Path]:
@@ -70,7 +70,7 @@ def copy_conpty(destination: Path, target: str) -> list[Path]:
     return copied
 
 
-PORTABLE_MARKER = "nyaterm-portable"
+PORTABLE_MARKER = windows_portable.LAYOUT["marker"]
 
 
 @dataclass(frozen=True)
@@ -365,15 +365,23 @@ def create_windows_packages(
     identity = release_identity(version)
     if includes_windows_msi(artifact_version):
         windows_msi_version(version)
-    portable_root = WORK_DIR / "NyaTerm-portable"
+    portable_root = WORK_DIR / windows_portable.LAYOUT["root"]
     portable_root.mkdir()
     shutil.copy2(binary, portable_root / "NyaTerm.exe")
     copy_helpers(portable_root, info.target)
     copy_conpty(portable_root, info.target)
     (portable_root / PORTABLE_MARKER).touch()
-    (portable_root / "data").mkdir()
-    (portable_root / "data" / ".keep").touch()
+    placeholder = portable_root / windows_portable.LAYOUT["data_placeholder"]
+    placeholder.parent.mkdir()
+    placeholder.touch()
     copy_release_documents(portable_root, version)
+    expected = set(windows_portable.payload_files(info.target)) | {
+        windows_portable.LAYOUT["data_placeholder"]
+    }
+    actual = {path.relative_to(portable_root).as_posix()
+              for path in portable_root.rglob("*") if path.is_file()}
+    if actual != expected:
+        raise RuntimeError(f"portable payload differs from contract: {actual ^ expected}")
     portable_output = (
         DIST_DIR / f"{APP_NAME}_{artifact_version}_{info.label}_portable.zip"
     )

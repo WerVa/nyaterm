@@ -11,6 +11,8 @@
 
 const PACKAGE_MANAGER: Option<&str> = option_env!("NYATERM_PACKAGE_MANAGER");
 
+pub mod portable;
+
 /// Name of the external package manager that owns updates for this build.
 ///
 /// Surrounding whitespace is ignored and an empty value counts as unset, so
