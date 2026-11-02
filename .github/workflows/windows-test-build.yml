@@ -1,0 +1,53 @@
+name: Windows Test Build
+
+# Builds the branch this workflow is run on and uploads the Windows x64 packages.
+# For testing on a fork only; it does not publish or sign anything.
+# A push to this branch starts the build; workflow_dispatch only lists a workflow
+# that exists on the default branch, so it is no use for a throwaway test branch.
+on:
+  push:
+    branches: [test/windows-build]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Package windows-x64
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          targets: x86_64-pc-windows-msvc
+          cache-key: windows-test-build
+          cache-on-failure: 'true'
+          save-cache: always
+      - name: Install NSIS
+        shell: pwsh
+        run: ./scripts/ci/install-nsis.ps1
+      - name: Prepare bundled ConPTY
+        run: python scripts/release/prepare_conpty.py
+      - name: Package native application
+        shell: bash
+        env:
+          NYATERM_ARTIFACT_VERSION: main-snapshot
+          TARGET: x86_64-pc-windows-msvc
+        run: python scripts/release/package_native.py "${TARGET}"
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nyaterm-windows-x64-test
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
