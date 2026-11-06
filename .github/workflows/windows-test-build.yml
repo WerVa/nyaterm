@@ -39,11 +39,18 @@ jobs:
       - name: Prepare bundled ConPTY
         run: python scripts/release/prepare_conpty.py
       - name: Package native application
-        shell: bash
+        shell: pwsh
         env:
           NYATERM_ARTIFACT_VERSION: main-snapshot
           TARGET: x86_64-pc-windows-msvc
-        run: python scripts/release/package_native.py "${TARGET}"
+        run: |
+          # Git Bash would put Git's /usr/bin/link.exe ahead of MSVC's linker.
+          $linker = (Get-Command link.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+          if ($linker -notmatch '\\VC\\Tools\\MSVC\\[^\\]+\\bin\\HostX64\\(x64|arm64)\\link\.exe$') {
+            throw "Expected Visual Studio MSVC linker, got: $linker"
+          }
+          python scripts/release/package_native.py "$env:TARGET"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:
