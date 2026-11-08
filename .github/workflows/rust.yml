@@ -138,6 +138,9 @@ jobs:
       # and worker tests. Keep real ConPTY execution covered in its own step.
       - name: Test Windows shared terminal execution
         if: runner.os == 'Windows'
+        # EXPERIMENT (fork only): does the test just need a bigger test-thread stack?
+        env:
+          RUST_MIN_STACK: "16777216"
         run: >-
           cargo test -p nyaterm-desktop --lib
           shared_entry_routes_native_codex_claude_and_external_calls_on_a_hidden_terminal
