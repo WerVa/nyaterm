@@ -89,8 +89,15 @@ pub const PORTS_SCRIPT: &str = r#"
 unsupported() { echo "NYATERM_PORTS_UNSUPPORTED"; exit 42; }
 if [ "$(uname -s 2>/dev/null)" = "Darwin" ]; then
   echo "@@FORMAT macos"
-  netstat -anv -p tcp 2>/dev/null
+  tcp=$(netstat -anv -p tcp 2>/dev/null)
+  printf '%s\n' "$tcp"
   netstat -anv -p udp 2>/dev/null
+  # macOS 26+ prints `name:pid` itself. Older releases print only the numeric
+  # pid, so names and users come from one `ps` (paid only on those hosts).
+  case "$tcp" in
+    *process:pid*) ;;
+    *) echo "@@USERS"; ps -axo pid=,user=,comm= 2>/dev/null ;;
+  esac
 elif command -v ss >/dev/null 2>&1; then
   echo "@@FORMAT ss"
   ss -tulnpe 2>/dev/null
@@ -202,7 +209,13 @@ pub fn parse_ports_output(output: &str) -> PortsSnapshot {
             main.push(line);
         }
     }
+    // The modern format has a `process:pid` column; older macOS only has a pid.
+    let legacy_macos = !main.iter().any(|line| line.contains("process:pid"));
     let mut entries = match format {
+        "macos" if legacy_macos => main
+            .iter()
+            .filter_map(|l| parse_macos_legacy_line(l))
+            .collect(),
         "macos" => main.iter().filter_map(|l| parse_macos_line(l)).collect(),
         "ss" => main.iter().filter_map(|l| parse_ss_line(l)).collect(),
         "sockstat" => main.iter().filter_map(|l| parse_sockstat_line(l)).collect(),
@@ -211,16 +224,30 @@ pub fn parse_ports_output(output: &str) -> PortsSnapshot {
     };
     match format {
         "macos" => {
-            let users: HashMap<u32, &str> = aux
+            // `pid user [command...]`; the command is a full path, possibly with spaces.
+            let known: HashMap<u32, (&str, &str)> = aux
                 .iter()
                 .filter_map(|line| {
-                    let mut parts = line.split_whitespace();
-                    Some((parts.next()?.parse().ok()?, parts.next()?))
+                    let line = line.trim_start();
+                    let (pid, rest) = line.split_once(char::is_whitespace)?;
+                    let rest = rest.trim_start();
+                    let (user, command) = rest
+                        .split_once(char::is_whitespace)
+                        .map_or((rest, ""), |(user, command)| (user, command.trim()));
+                    Some((pid.parse().ok()?, (user, command)))
                 })
                 .collect();
             for entry in &mut entries {
-                if let Some(pid) = entry.pid {
-                    entry.user = users.get(&pid).map(|user| user.to_string());
+                let Some((user, command)) = entry.pid.and_then(|pid| known.get(&pid)) else {
+                    continue;
+                };
+                entry.user = Some((*user).to_string()).filter(|u| !u.is_empty());
+                if entry.process.is_none() {
+                    entry.process = command
+                        .rsplit('/')
+                        .next()
+                        .map(str::to_string)
+                        .filter(|name| !name.is_empty());
                 }
             }
         }
@@ -404,6 +431,37 @@ fn parse_macos_line(line: &str) -> Option<PortEntry> {
     })
 }
 
+/// macOS before the `process:pid` column: after the addresses come
+/// `rhiwat shiwat pid epid state options` (TCP has a `(state)` column first).
+fn parse_macos_legacy_line(line: &str) -> Option<PortEntry> {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    let proto = parts.first()?;
+    let (protocol, state_columns) = if proto.starts_with("tcp") {
+        (PortProtocol::Tcp, 1)
+    } else if proto.starts_with("udp") {
+        (PortProtocol::Udp, 0)
+    } else {
+        return None;
+    };
+    // proto recvq sendq local foreign [state] rhiwat shiwat pid epid state options
+    let pid_at = 5 + state_columns + 2;
+    if parts.len() <= pid_at + 1 {
+        return None;
+    }
+    if protocol == PortProtocol::Tcp && parts[5] != "LISTEN" {
+        return None;
+    }
+    let (address, port) = split_dot_port(parts[3])?;
+    Some(PortEntry {
+        protocol,
+        address: address.to_string(),
+        port,
+        pid: parts[pid_at].parse().ok().filter(|pid| *pid > 0),
+        process: None,
+        user: None,
+    })
+}
+
 #[cfg(windows)]
 mod native {
     use super::{PortEntry, PortProtocol, PortsSnapshot};
@@ -544,6 +602,40 @@ udp        0      0 0.0.0.0:68              0.0.0.0:*                           
         assert_eq!(web.pid, None);
     }
 
+    const MACOS_LEGACY: &str = "@@FORMAT macos
+Active Internet connections (including servers)
+Proto Recv-Q Send-Q  Local Address          Foreign Address        (state)      rhiwat  shiwat    pid   epid state    options
+tcp4       0      0  127.0.0.1.49156        *.*                    LISTEN       131072  131072   1234      0 0x0100 0x00000006
+tcp46      0      0  *.5000                 *.*                    LISTEN       131072  131072    605      0 0x0100 0x00000006
+tcp4       0      0  127.0.0.1.55000        10.0.0.2.443           ESTABLISHED  131072  131072     77      0 0x0102 0x00000006
+Active Internet connections (including servers)
+Proto Recv-Q Send-Q  Local Address          Foreign Address                    rhiwat  shiwat    pid   epid state    options
+udp4       0      0  *.5353                 *.*                                786896    9216    482      0 0x0000 0x00000004
+@@USERS
+ 1234 me /Applications/Some App.app/Contents/MacOS/Some App
+  605 jakub /System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter
+  482 _mdnsresponder /usr/sbin/mDNSResponder
+";
+
+    #[test]
+    fn macos_before_the_process_pid_column_still_lists_ports_with_names_from_ps() {
+        let snapshot = parse_ports_output(MACOS_LEGACY);
+        assert_eq!(
+            snapshot.entries.len(),
+            3,
+            "ESTABLISHED rows are not listeners"
+        );
+        let app = snapshot.entries.iter().find(|e| e.port == 49156).unwrap();
+        assert_eq!(app.pid, Some(1234));
+        assert_eq!(app.process.as_deref(), Some("Some App"));
+        assert_eq!(app.user.as_deref(), Some("me"));
+        let udp = snapshot.entries.iter().find(|e| e.port == 5353).unwrap();
+        assert_eq!(udp.protocol, PortProtocol::Udp);
+        assert_eq!(udp.pid, Some(482));
+        assert_eq!(udp.process.as_deref(), Some("mDNSResponder"));
+        assert!(!snapshot.owners_hidden);
+    }
+
     #[test]
     fn process_details_split_the_user_from_a_command_with_spaces() {
         let details = parse_process_details("  root   /usr/sbin/sshd -D -o \"A B\"\n");
@@ -557,8 +649,13 @@ udp        0      0 0.0.0.0:68              0.0.0.0:*                           
     }
 
     #[test]
-    fn the_macos_script_no_longer_spawns_ps_for_every_refresh() {
-        assert!(!PORTS_SCRIPT.contains("ps -ax"));
+    fn ps_is_only_spawned_on_macos_releases_without_the_process_pid_column() {
+        // The fast path must not pay for `ps`; it is reachable only through the
+        // legacy branch that checks for the modern column first.
+        let ps_at = PORTS_SCRIPT.find("ps -axo").expect("legacy branch");
+        let guard_at = PORTS_SCRIPT.find("*process:pid*)").expect("column check");
+        assert!(guard_at < ps_at);
+        assert_eq!(PORTS_SCRIPT.matches("ps -axo").count(), 1);
     }
 
     #[test]
@@ -571,12 +668,22 @@ udp        0      0 0.0.0.0:68              0.0.0.0:*                           
     fn local_macos_listing_runs_and_finds_listeners() {
         let snapshot =
             list_ports(&HostTarget::Local, HostOs::local(), Elevation::None).expect("netstat");
+        // Show the raw tool output when parsing finds nothing: the format differs
+        // between macOS releases, and a bare assertion would hide that.
+        let raw = || {
+            HostTarget::Local
+                .run_sh(
+                    PORTS_SCRIPT,
+                    Elevation::None,
+                    std::time::Duration::from_secs(10),
+                )
+                .map(|out| out.stdout.lines().take(12).collect::<Vec<_>>().join("\n"))
+                .unwrap_or_default()
+        };
         assert!(
-            snapshot
-                .entries
-                .iter()
-                .all(|e| e.port > 0 || e.protocol == PortProtocol::Udp)
+            snapshot.entries.iter().any(|e| e.pid.is_some()),
+            "no listener with a pid parsed; raw output:\n{}",
+            raw()
         );
-        assert!(snapshot.entries.iter().any(|e| e.pid.is_some()));
     }
 }

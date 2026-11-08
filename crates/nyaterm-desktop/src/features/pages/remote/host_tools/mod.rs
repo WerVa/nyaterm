@@ -233,12 +233,12 @@ impl HostToolsPanel {
 
     // ------------------------------------------------------ app boundary --
 
-    #[cfg(test)]
+    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
     pub(in crate::features) fn loaded_port_count(&self) -> usize {
         self.ports.len()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
     pub(in crate::features) fn loaded_service_count(&self) -> usize {
         self.services.len()
     }
