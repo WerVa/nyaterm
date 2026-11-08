@@ -449,7 +449,7 @@ mod tests {
     const MACOS: &str = "@@FORMAT macos
 Active Internet connections (including servers)
 Proto Recv-Q Send-Q  Local Address          Foreign Address        (state)          rxbytes      txbytes  rhiwat  shiwat          process:pid    state  options           gencnt    flags   flags1 usecnt rtncnt fltrs
-tcp4       0      0  127.0.0.1.49156        *.*                    LISTEN                 0            0  131072  131072 oxideterm-native:3530   00100 00000006 0000000000004580 00000001 00002800      1      0 000000
+tcp4       0      0  127.0.0.1.49156        *.*                    LISTEN                 0            0  131072  131072 devserver:3530   00100 00000006 0000000000004580 00000001 00002800      1      0 000000
 tcp46      0      0  *.5000                 *.*                    LISTEN                 0            0  131072  131072 Code Helper (Plu:951    00100 00000106 0000000000001a66 00000001 00000800      1      0 000000
 tcp4       0      0  127.0.0.1.55000        10.0.0.2.443           ESTABLISHED         9000         1000  131072  131072             curl:77     00100 00000106 0000000000001a66 00000001 00000800      1      0 000000
 Active Internet connections (including servers)
