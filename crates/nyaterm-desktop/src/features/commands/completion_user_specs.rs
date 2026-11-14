@@ -336,7 +336,7 @@ mod tests {
     #[test]
     fn slow_spec_io_does_not_hold_the_query_workers_mailbox() {
         let (entered, started) = std::sync::mpsc::channel();
-        let (release, blocked) = std::sync::mpsc::channel();
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
         let loader = UserSpecLoader::spawn_refresh(true, move || {
             let _ = entered.send(());
             let _ = blocked.recv();
