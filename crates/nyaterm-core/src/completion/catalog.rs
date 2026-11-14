@@ -163,7 +163,10 @@ impl Catalog {
             && bare_word(&node.token)
             && node.aliases.iter().all(|a| bare_word(a))
             && node.flags.iter().chain(&node.persistent).all(|f| {
-                (!f.long.is_empty() || !f.short.is_empty()) && f.values.iter().all(|v| bare_word(v))
+                (!f.long.is_empty() || !f.short.is_empty())
+                    && (f.long.is_empty() || bare_word(&f.long))
+                    && (f.short.is_empty() || bare_word(&f.short))
+                    && f.values.iter().all(|v| bare_word(v))
             })
             && node.children.iter().all(|n| Self::valid_node(n, depth + 1))
     }
@@ -176,18 +179,8 @@ impl Catalog {
         if catalog.version != 1 || catalog.roots.len() > 20000 {
             return Err("Unsupported completion catalog");
         }
-        fn valid(node: &CommandNode, depth: usize) -> bool {
-            depth <= 32
-                && bare_word(&node.token)
-                && node.aliases.iter().all(|a| bare_word(a))
-                && node.flags.iter().chain(&node.persistent).all(|f| {
-                    (!f.long.is_empty() || !f.short.is_empty())
-                        && f.values.iter().all(|v| bare_word(v))
-                })
-                && node.children.iter().all(|n| valid(n, depth + 1))
-        }
         for (i, root) in catalog.roots.iter().enumerate() {
-            if !valid(root, 0) || catalog.index.insert(root.token.clone(), i).is_some() {
+            if !Self::valid_node(root, 0) || catalog.index.insert(root.token.clone(), i).is_some() {
                 return Err("Invalid completion catalog tree");
             }
             for alias in &root.aliases {
@@ -456,6 +449,28 @@ mod tests {
             .into_iter()
             .map(|(text, _, _)| text)
             .collect()
+    }
+
+    #[test]
+    fn flag_names_are_validated_before_any_catalog_mutation() {
+        for group in ["flags", "persistent"] {
+            for field in ["long", "short"] {
+                for name in [
+                    "bad\nflag",
+                    "bad\u{1b}flag",
+                    "bad\u{200b}flag",
+                    "bad\u{202e}flag",
+                ] {
+                    let data = serde_json::to_vec(&serde_json::json!({"version": 1, "roots": [{"token": "tool", group: [{field: name}]}]})).unwrap();
+                    assert!(super::Catalog::decode(&data).is_err());
+                    let mut catalog = super::Catalog::embedded().unwrap();
+                    let count = catalog.roots.len();
+                    assert!(catalog.merge_user_spec(&data).is_err());
+                    assert!(catalog.merge_supplement(&data).is_err());
+                    assert_eq!(catalog.roots.len(), count);
+                }
+            }
+        }
     }
 
     #[test]

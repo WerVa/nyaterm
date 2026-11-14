@@ -1,13 +1,13 @@
 //! Reads user-written completion spec files (`<config dir>/completions/*.json`).
 //!
-//! Everything here is blocking file I/O and runs only on the completion worker.
+//! Blocking file I/O runs on a separate spec loader, never the query worker.
 //! Reading is defensive: only regular files, hard size and count limits, and a
-//! file that cannot be used is reported by name and reason, never by content.
+//! file that cannot be used is reported by reason, never by name or content.
 use std::ffi::OsString;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use nyaterm_core::completion::CompletionEngine;
 
@@ -72,34 +72,97 @@ fn is_json(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
 }
 
-/// Lists candidate files in name order. A missing or unreadable directory is
-/// simply "no specs". Symlinks and other non-regular files are ignored, so a
+/// Lists candidate files in name order. A missing directory means no specs;
+/// unreadable or oversized scans preserve the previous catalog. Symlinks are ignored, so a
 /// link cannot point the reader at an arbitrary path or device.
+#[cfg(test)]
 pub(super) fn list_entries(dir: &Path) -> Vec<SpecEntry> {
-    let Ok(read_dir) = fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut entries: Vec<SpecEntry> = read_dir
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let path = entry.path();
-            let metadata = fs::symlink_metadata(&path).ok()?;
-            (metadata.is_file() && is_json(&path)).then(|| SpecEntry {
+    try_list_entries(dir).unwrap_or_default()
+}
+
+fn try_list_entries(dir: &Path) -> Option<Vec<SpecEntry>> {
+    match fs::symlink_metadata(dir) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(Vec::new()),
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        _ => return None,
+    }
+    let read_dir = fs::read_dir(dir).ok()?;
+    let mut entries = Vec::new();
+    for (index, entry) in read_dir.enumerate() {
+        if index >= 4096 {
+            return None;
+        }
+        let entry = entry.ok()?;
+        let path = entry.path();
+        if !is_json(&path) {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(&path).ok()?;
+        if metadata.is_file() {
+            entries.push(SpecEntry {
                 name: entry.file_name(),
                 len: metadata.len(),
                 modified: metadata.modified().ok(),
                 path,
-            })
-        })
-        .collect();
+            });
+        }
+    }
     entries.sort_by(|a, b| a.name.cmp(&b.name));
-    entries
+    Some(entries)
+}
+
+#[cfg(unix)]
+fn open_regular(path: &Path) -> Option<fs::File> {
+    use std::os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::{ffi::OsStrExt, fs::OpenOptionsExt},
+    };
+    let parent = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path.parent()?)
+        .ok()?;
+    let name = std::ffi::CString::new(path.file_name()?.as_bytes()).ok()?;
+    // The directory descriptor pins the parent; no path component from the
+    // scanned filename can redirect this open after the initial inspection.
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return None;
+    }
+    let file = unsafe { fs::File::from_raw_fd(fd) };
+    file.metadata().ok()?.is_file().then_some(file)
+}
+
+#[cfg(windows)]
+fn open_regular(path: &Path) -> Option<fs::File> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
+    };
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .ok()?;
+    let metadata = file.metadata().ok()?;
+    (metadata.is_file() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0)
+        .then_some(file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_regular(_path: &Path) -> Option<fs::File> {
+    None
 }
 
 fn read_limited(path: &Path) -> Option<Vec<u8>> {
     let mut data = Vec::new();
-    fs::File::open(path)
-        .ok()?
+    open_regular(path)?
         .take(MAX_SPEC_FILE_BYTES + 1)
         .read_to_end(&mut data)
         .ok()?;
@@ -128,6 +191,9 @@ pub(super) fn load(entries: &[SpecEntry]) -> LoadedSpecs {
             Some(data) if data.len() as u64 > MAX_SPEC_FILE_BYTES => {
                 loaded.skipped.push((name, SkipReason::TooLarge));
             }
+            Some(data) if total + data.len() as u64 > MAX_SPEC_TOTAL_BYTES => {
+                loaded.skipped.push((name, SkipReason::TotalTooLarge));
+            }
             Some(data) => {
                 total += data.len() as u64;
                 loaded.files.push((name, data));
@@ -138,14 +204,13 @@ pub(super) fn load(entries: &[SpecEntry]) -> LoadedSpecs {
     loaded
 }
 
-/// How often a search re-checks the directory for edits.
+/// How often the loader re-checks the directory for edits.
 const RECHECK_INTERVAL: Duration = Duration::from_secs(3);
 
-/// Owned by the completion worker; applies the spec directory to its engine.
+/// Owned by the spec loader; prepares a catalog for the query worker.
 pub(super) struct UserSpecs {
     dir: Option<PathBuf>,
     fingerprint: Option<Fingerprint>,
-    checked_at: Option<Instant>,
 }
 
 impl UserSpecs {
@@ -153,33 +218,21 @@ impl UserSpecs {
         Self {
             dir,
             fingerprint: None,
-            checked_at: None,
         }
-    }
-
-    /// Cheap enough for the search path: one directory listing every few
-    /// seconds, and file contents are only read when something changed.
-    pub(super) fn refresh_if_due(&mut self, engine: &mut CompletionEngine) {
-        if self
-            .checked_at
-            .is_some_and(|at| at.elapsed() < RECHECK_INTERVAL)
-        {
-            return;
-        }
-        self.refresh(engine);
     }
 
     /// Applies the directory when its fingerprint changed. Never panics into
     /// the worker: a failure leaves the previous catalog in place.
-    pub(super) fn refresh(&mut self, engine: &mut CompletionEngine) {
-        self.checked_at = Some(Instant::now());
+    pub(super) fn refresh(&mut self, engine: &mut CompletionEngine) -> bool {
         let Some(dir) = self.dir.as_deref() else {
-            return;
+            return false;
         };
-        let entries = list_entries(dir);
+        let Some(entries) = try_list_entries(dir) else {
+            return false;
+        };
         let fingerprint = Fingerprint::of(&entries);
         if self.fingerprint.as_ref() == Some(&fingerprint) {
-            return;
+            return false;
         }
         let applied = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut loaded = load(&entries);
@@ -196,8 +249,8 @@ impl UserSpecs {
         self.fingerprint = Some(fingerprint);
         match applied {
             Ok(loaded) => {
-                for (name, reason) in &loaded.skipped {
-                    tracing::warn!(file = %name, reason = reason.as_str(), "completion spec skipped");
+                for (_, reason) in &loaded.skipped {
+                    tracing::warn!(reason = reason.as_str(), "completion spec skipped");
                 }
                 if !loaded.files.is_empty() {
                     tracing::info!(
@@ -211,18 +264,115 @@ impl UserSpecs {
                         "completion specs loaded"
                     );
                 }
+                true
             }
-            Err(_) => tracing::warn!("completion specs could not be applied"),
+            Err(_) => {
+                tracing::warn!("completion specs could not be applied");
+                false
+            }
         }
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct UserSpecLoader {
+    requests: std::sync::mpsc::SyncSender<()>,
+    result: std::sync::Arc<std::sync::Mutex<Option<CompletionEngine>>>,
+}
+impl UserSpecLoader {
+    pub(super) fn spawn(dir: Option<PathBuf>) -> Self {
+        let mut specs = UserSpecs::new(dir.clone());
+        let mut engine = None;
+        Self::spawn_refresh(dir.is_some(), move || {
+            let engine = engine.get_or_insert_with(CompletionEngine::embedded);
+            specs
+                .refresh(engine)
+                .then(|| std::mem::replace(engine, CompletionEngine::embedded()))
+        })
+    }
+
+    fn spawn_refresh(
+        enabled: bool,
+        mut refresh: impl FnMut() -> Option<CompletionEngine> + Send + 'static,
+    ) -> Self {
+        let (requests, receiver) = std::sync::mpsc::sync_channel(1);
+        let result = std::sync::Arc::new(std::sync::Mutex::new(None));
+        if enabled {
+            let output = result.clone();
+            let _ = nyaterm_core::runtime::worker::spawn("completion-specs".into(), move || {
+                loop {
+                    if let Some(engine) = refresh() {
+                        *output.lock().unwrap_or_else(|e| e.into_inner()) = Some(engine);
+                    }
+                    match receiver.recv_timeout(RECHECK_INTERVAL) {
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                        _ => continue,
+                    }
+                }
+            });
+        }
+        Self { requests, result }
+    }
+    pub(super) fn request(&self) {
+        let _ = self.requests.try_send(());
+    }
+    pub(super) fn take(&self) -> Option<CompletionEngine> {
+        self.result.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        Fingerprint, MAX_SPEC_FILE_BYTES, MAX_SPEC_FILES, MAX_SPEC_TOTAL_BYTES, SkipReason,
+        UserSpecLoader, UserSpecs, list_entries, load,
+    };
+    use nyaterm_core::completion::CompletionEngine;
     use std::io::Write;
+    use std::{fs, path::Path};
 
     const VALID: &str = r#"{"version":1,"roots":[{"token":"deploy","description":"ship"}]}"#;
+
+    #[test]
+    fn slow_spec_io_does_not_hold_the_query_workers_mailbox() {
+        let (entered, started) = std::sync::mpsc::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let loader = UserSpecLoader::spawn_refresh(true, move || {
+            let _ = entered.send(());
+            let _ = blocked.recv();
+            None
+        });
+        started
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        let (queried, result) = std::sync::mpsc::channel();
+        let query = std::thread::spawn(move || {
+            loader.request();
+            queried.send(loader.take().is_none()).unwrap();
+        });
+        let answer = result.recv_timeout(std::time::Duration::from_secs(2));
+        drop(release);
+        query.join().unwrap();
+        assert_eq!(answer, Ok(true));
+    }
+
+    #[test]
+    fn excessive_directory_entries_preserve_the_last_good_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "spec.json", VALID.as_bytes());
+        let mut engine = CompletionEngine::embedded();
+        let mut specs = UserSpecs::new(Some(dir.path().to_path_buf()));
+        assert!(specs.refresh(&mut engine));
+        for index in 0..4096 {
+            write(dir.path(), &format!("{index}.txt"), b"");
+        }
+        assert!(!specs.refresh(&mut engine));
+        assert!(
+            complete(&mut engine, "depl")
+                .iter()
+                .any(|(name, _)| name == "deploy")
+        );
+    }
 
     fn write(dir: &Path, name: &str, content: &[u8]) {
         let mut file = fs::File::create(dir.join(name)).unwrap();
@@ -263,6 +413,43 @@ mod tests {
         )
         .unwrap();
         assert!(list_entries(dir.path()).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacing_a_scanned_file_with_a_symlink_is_rejected_at_open() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "spec.json", VALID.as_bytes());
+        let entries = list_entries(dir.path());
+        fs::remove_file(dir.path().join("spec.json")).unwrap();
+        std::os::unix::fs::symlink("/dev/zero", dir.path().join("spec.json")).unwrap();
+        assert!(load(&entries).files.is_empty());
+    }
+
+    #[test]
+    fn changed_lengths_cannot_bypass_the_total_read_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        for index in 0..10 {
+            write(dir.path(), &format!("{index}.json"), b"");
+        }
+        let entries = list_entries(dir.path());
+        for index in 0..10 {
+            write(
+                dir.path(),
+                &format!("{index}.json"),
+                &vec![b' '; MAX_SPEC_FILE_BYTES as usize],
+            );
+        }
+        let loaded = load(&entries);
+        assert!(
+            loaded
+                .files
+                .iter()
+                .map(|(_, bytes)| bytes.len())
+                .sum::<usize>()
+                <= MAX_SPEC_TOTAL_BYTES as usize
+        );
+        assert_eq!(loaded.files.len(), 8);
     }
 
     #[test]
@@ -412,7 +599,7 @@ mod tests {
         let mut engine = CompletionEngine::embedded();
         let mut specs = UserSpecs::new(None);
         specs.refresh(&mut engine);
-        specs.refresh_if_due(&mut engine);
+        specs.refresh(&mut engine);
         assert!(
             complete(&mut engine, "git ch")
                 .iter()
