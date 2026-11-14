@@ -1,7 +1,6 @@
 use super::helpers::{normalized_transfer_browser_path, remote_child_path};
 use super::panel::TransferPanel;
 use super::transfer_menu_position;
-use crate::features::transfers::natural_compare_ascii;
 use crate::features::{NyaTermApp, text_inputs::TextInputSetup};
 use crate::models::{
     TransferBrowserBreadcrumbSegment, TransferBrowserChildrenMenuStatus,
@@ -12,6 +11,7 @@ use gpui::{
     StatefulInteractiveElement as _, Window, deferred, div, prelude::*, px, rgb, svg,
 };
 use nyaterm_core::truncate_preview;
+use nyaterm_files::file_browser::listing::natural_compare;
 use nyaterm_files::sftp::SftpFileEntry;
 use nyaterm_ui::{NyaInput, NyaScrollable};
 use rust_i18n::t;
@@ -103,18 +103,6 @@ pub(in crate::features::pages::transfers) fn transfer_browser_path_row(
                 .flex()
                 .items_center()
                 .gap_1()
-                .children(browser.sudo.clone().map(|(session, status)| {
-                    nyaterm_ui::NyaButton::new(
-                        "transfer-sudo",
-                        crate::features::transfers::privilege_runtime::sudo_label(status),
-                    )
-                    .disabled(status.is_busy())
-                    .on_click(cx.listener(move |panel, _, window, cx| {
-                        panel.with_app(cx, |app, cx| {
-                            app.toggle_file_sudo(session.clone(), window, cx)
-                        });
-                    }))
-                }))
                 .when(browser.path_editing, |this| {
                     this.child(
                         div()
@@ -1102,7 +1090,7 @@ fn transfer_browser_child_directories(
         .cloned()
         .collect::<Vec<_>>();
     directories.sort_by(|left, right| {
-        natural_compare_ascii(&left.name, &right.name).then_with(|| left.name.cmp(&right.name))
+        natural_compare(&left.name, &right.name).then_with(|| left.name.cmp(&right.name))
     });
     directories
 }

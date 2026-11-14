@@ -7,6 +7,10 @@ pub(in crate::features) use nyaterm_terminal_gpui::geometry::{
     TerminalVisualScrollGeometry, terminal_effective_visual_scroll_offset_px,
     terminal_snapshot_anchor_row_for_display_offset, terminal_snapshot_covers_display_offset,
 };
+use nyaterm_terminal_gpui::keywords::{
+    precompute_terminal_keyword_highlights_for_ranges_with_stats_and_cancel,
+    terminal_keyword_highlight_expanded_ranges,
+};
 use nyaterm_terminal_gpui::stripes::{TerminalStripeMode, terminal_row_stripe_color};
 
 use crate::features::NyaTermApp;
@@ -37,9 +41,8 @@ use crate::models::{
 use crate::terminal::{
     NyaTerminalElement, NyaTerminalLayoutCache, TerminalGridSelection,
     TerminalKeywordHighlightConfig, TerminalKeywordHighlightSnapshot, TerminalKeywordHighlighter,
-    TerminalLineDecorations, compile_terminal_keyword_highlighter,
-    precompute_terminal_keyword_highlights_for_rows_with_stats_and_cancel, terminal_font_features,
-    terminal_keyword_highlight_config_key, terminal_keyword_highlight_expanded_rows,
+    TerminalLineDecorations, compile_terminal_keyword_highlighter, terminal_font_features,
+    terminal_keyword_highlight_config_key,
 };
 use crate::theme::ThemePalette;
 use std::collections::hash_map::DefaultHasher;
@@ -60,6 +63,7 @@ fn terminal_surface_text_first_repaint_ready(
     terminal_scroll_needs_text_first_repaint(state, text_updated) && text_snapshot_cached
 }
 
+mod command_blocks;
 mod wheel_zoom;
 mod wrapping;
 
@@ -108,24 +112,28 @@ fn terminal_keyword_highlight_request_key(
     rules_key: u64,
     rows: Range<usize>,
 ) -> TerminalKeywordHighlightRequestKey {
-    let rows = terminal_keyword_highlight_expanded_rows(snapshot, rows);
+    let ranges = terminal_keyword_highlight_expanded_ranges(snapshot, &[rows]);
+    let rows =
+        ranges.first().map_or(0, |range| range.start)..ranges.last().map_or(0, |range| range.end);
     let row_start = rows.start.min(snapshot.row_count());
     let row_end = rows.end.min(snapshot.row_count()).max(row_start);
     let mut hasher = DefaultHasher::new();
+    ranges.hash(&mut hasher);
     snapshot.history.alternate_screen.hash(&mut hasher);
     if rows.contains(&snapshot.cursor.row) {
         snapshot.cursor.row.hash(&mut hasher);
     }
-    if snapshot.logical_lines.is_some() {
+    if snapshot.logical_lines.is_some() || snapshot.display_rows.is_some() {
         // The worker owns the full source range. Frame identity is sufficient
         // here and keeps preparing a huge logical line off the UI thread.
         Arc::as_ptr(&snapshot.row_data)
             .cast::<()>()
             .hash(&mut hasher);
     } else {
-        let rows = snapshot.rows().get(row_start..row_end).unwrap_or_default();
-        rows.len().hash(&mut hasher);
-        for row in rows {
+        for row in ranges
+            .iter()
+            .flat_map(|range| &snapshot.rows()[range.clone()])
+        {
             (
                 row.signature,
                 row.wrapped,
@@ -412,6 +420,7 @@ pub(in crate::features) struct TerminalSurface {
     last_horizontal_cursor: Option<(TerminalLineId, usize)>,
     last_horizontal_input: Option<Instant>,
     last_horizontal_search: Option<(TerminalLineId, usize)>,
+    command_blocks: crate::models::terminal::command_blocks::TerminalCommandBlockState,
     painted_unwrapped: Option<Arc<nyaterm_terminal_gpui::unwrapped::TerminalUnwrappedLayout>>,
     timestamp_format: String,
     scroll_offset: usize,
@@ -499,6 +508,7 @@ impl TerminalSurface {
             last_horizontal_cursor: None,
             last_horizontal_input: None,
             last_horizontal_search: None,
+            command_blocks: Default::default(),
             painted_unwrapped: None,
             timestamp_format: nyaterm_core::DEFAULT_TERMINAL_TIMESTAMP_FORMAT.to_string(),
             scroll_offset: 0,
@@ -819,12 +829,16 @@ impl TerminalSurface {
         let desired_show_cursor = show_cursor
             && !terminal_visual_scroll_active_for_state(scroll_offset, scroll_residual_lines);
         self.advance_history(history);
-        let retained_rows_should_reset = self.retained_rows_should_reset(
-            snapshot.as_ref(),
-            history,
-            scrollback_len,
-            viewport_rows,
-        );
+        let retained_rows_should_reset = self
+            .snapshot
+            .as_ref()
+            .is_some_and(|old| old.display_rows != snapshot.display_rows)
+            || self.retained_rows_should_reset(
+                snapshot.as_ref(),
+                history,
+                scrollback_len,
+                viewport_rows,
+            );
         let pending_local_scroll_state =
             self.pending_local_scroll_state_reanchored_for_frame(&scroll);
         if !retained_rows_should_reset
@@ -1310,7 +1324,7 @@ impl TerminalSurface {
         // Rich logical frames already share their source row Arcs. Retaining
         // and estimating every cell here would scan a long line on the UI
         // thread, even though physical-row synthesis cannot serve this mode.
-        if snapshot.logical_lines.is_none() {
+        if snapshot.logical_lines.is_none() && snapshot.display_rows.is_none() {
             self.remember_retained_snapshot_rows(snapshot.as_ref());
         }
         self.retained_snapshots.retain(|retained| {
@@ -1452,7 +1466,12 @@ impl TerminalSurface {
         viewport_rows: usize,
         scrollback_len: usize,
     ) -> bool {
-        if self.wrap_mode == nyaterm_core::models::settings::TerminalWrapMode::None {
+        if self.wrap_mode == nyaterm_core::models::settings::TerminalWrapMode::None
+            || self
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.display_rows.is_some())
+        {
             return false;
         }
         let viewport_rows = viewport_rows.max(1);
@@ -1534,7 +1553,12 @@ impl TerminalSurface {
     ) -> Option<Arc<TerminalSnapshot>> {
         // Physical-row cache synthesis can split a logical line. Reuse a complete
         // committed frame or request one from the worker instead.
-        if self.wrap_mode == nyaterm_core::models::settings::TerminalWrapMode::None {
+        if self.wrap_mode == nyaterm_core::models::settings::TerminalWrapMode::None
+            || self
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.display_rows.is_some())
+        {
             return None;
         }
 
@@ -1604,6 +1628,12 @@ impl TerminalSurface {
 
         Some(Arc::new(TerminalSnapshot::from_rows(
             nyaterm_terminal::TerminalSnapshotMeta {
+                command_blocks: self
+                    .snapshot
+                    .as_ref()
+                    .map(|s| s.command_blocks.clone())
+                    .unwrap_or_default(),
+                display_rows: self.snapshot.as_ref().and_then(|s| s.display_rows.clone()),
                 history: self.history,
                 shell_input_anchor: None,
                 command_navigation_target: None,
@@ -1649,6 +1679,12 @@ impl TerminalSurface {
         }
         Some(Arc::new(TerminalSnapshot::from_rows(
             nyaterm_terminal::TerminalSnapshotMeta {
+                command_blocks: self
+                    .snapshot
+                    .as_ref()
+                    .map(|s| s.command_blocks.clone())
+                    .unwrap_or_default(),
+                display_rows: self.snapshot.as_ref().and_then(|s| s.display_rows.clone()),
                 history: self.history,
                 shell_input_anchor: None,
                 command_navigation_target: None,
@@ -1984,18 +2020,20 @@ impl TerminalSurface {
             self.viewport_rows,
             self.scrollback_len,
         );
-        let visible_rows =
-            terminal_keyword_highlight_expanded_rows(snapshot.as_ref(), visible_rows);
+        let visible_ranges = terminal_keyword_highlight_expanded_ranges(
+            snapshot.as_ref(),
+            std::slice::from_ref(&visible_rows),
+        );
 
         let rules = self.keyword_rules.clone();
         let config = self.keyword_highlight_config();
         let rules_key = terminal_keyword_highlight_config_key(rules.as_slice(), config);
         let visible_ready = self.keyword_highlights.as_ref().is_some_and(|highlights| {
             highlights.rules_key() == rules_key
-                && highlights.matches_snapshot_rows(
+                && highlights.matches_snapshot_ranges(
                     snapshot.as_ref(),
                     self.palette,
-                    visible_rows.clone(),
+                    &visible_ranges,
                 )
         });
         if visible_ready && output_pressure {
@@ -2017,12 +2055,16 @@ impl TerminalSurface {
         } else {
             visible_rows
         };
+        let requested_ranges = terminal_keyword_highlight_expanded_ranges(
+            snapshot.as_ref(),
+            std::slice::from_ref(&requested_rows),
+        );
         if visible_ready
             && self.keyword_highlights.as_ref().is_some_and(|highlights| {
-                highlights.matches_snapshot_rows(
+                highlights.matches_snapshot_ranges(
                     snapshot.as_ref(),
                     self.palette,
-                    requested_rows.clone(),
+                    &requested_ranges,
                 )
             })
         {
@@ -2030,9 +2072,7 @@ impl TerminalSurface {
             return;
         }
         let requested_row_count = requested_rows.len();
-        let requested_rows =
-            terminal_keyword_highlight_expanded_rows(snapshot.as_ref(), requested_rows);
-        let expanded_requested_row_count = requested_rows.len();
+        let expanded_requested_row_count: usize = requested_ranges.iter().map(Range::len).sum();
         let request_key = terminal_keyword_highlight_request_key(
             snapshot.as_ref(),
             rules_key,
@@ -2068,7 +2108,6 @@ impl TerminalSurface {
         // Keep the last published snapshot drawable while the replacement is parsed in the
         // background, matching the editor's stale-until-reparsed behavior.
         let highlighter = self.cached_keyword_highlighter_for_rules(&rules);
-        let palette = self.palette;
         let previous_highlights = self.keyword_highlights.clone();
         self.keyword_highlight_task = Some(cx.spawn(async move |this, cx| {
             let (rules, highlighter, result, highlight_duration) = cx
@@ -2078,12 +2117,11 @@ impl TerminalSurface {
                     });
                     let highlight_started_at = Instant::now();
                     let result =
-                        precompute_terminal_keyword_highlights_for_rows_with_stats_and_cancel(
+                        precompute_terminal_keyword_highlights_for_ranges_with_stats_and_cancel(
                             snapshot.as_ref(),
                             highlighter.as_ref(),
-                            palette,
                             previous_highlights.as_deref(),
-                            requested_rows,
+                            &requested_ranges,
                             || cancel_epoch.load(Ordering::Acquire) != request_cancel_epoch,
                         );
                     let highlight_duration = highlight_started_at.elapsed();
@@ -2764,6 +2802,13 @@ impl TerminalSurface {
             .map_or((self.scroll_offset, self.scrollback_len), |index| {
                 index.scroll_metrics(self.scroll_offset, self.viewport_rows)
             });
+        let (scroll_offset, max) = self
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.display_rows.as_ref())
+            .map_or((scroll_offset, max), |index| {
+                index.scroll_metrics(self.scroll_offset, self.viewport_rows)
+            });
         let viewport_rows = self.viewport_rows.max(1);
         let show = max > 0;
         let app = self.app.as_ref().and_then(WeakEntity::upgrade);
@@ -2788,12 +2833,40 @@ impl TerminalSurface {
                 .as_ref()
                 .is_some_and(|drag| drag.session_id.as_deref() == Some(session_id.as_str()))
         });
-        let overview_markers = self.overview_markers.clone();
-        let overview_total_rows = self.overview_total_rows;
+        let mut overview_markers = self.overview_markers.clone();
+        let mut overview_total_rows = self.overview_total_rows;
+        if let Some(index) = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.display_rows.as_ref())
+        {
+            overview_markers = overview_markers
+                .iter()
+                .map(|marker| {
+                    let mut marker = *marker;
+                    marker.absolute_line = index.display_row(marker.absolute_line);
+                    marker
+                })
+                .collect::<Vec<_>>()
+                .into();
+            overview_total_rows = index.rows();
+        }
         let overview_track_height_px =
             track_bounds.map(track_height).unwrap_or(1.0).round() as usize;
-        let overview_marker_buckets =
-            self.overview_marker_buckets_for_track_height(overview_track_height_px);
+        let overview_marker_buckets = if self
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| s.display_rows.is_some())
+        {
+            terminal_overview_marker_buckets(
+                &overview_markers,
+                overview_total_rows,
+                overview_track_height_px,
+            )
+            .into()
+        } else {
+            self.overview_marker_buckets_for_track_height(overview_track_height_px)
+        };
 
         div()
             .id(SharedString::from(format!(
@@ -2913,6 +2986,11 @@ fn terminal_keyword_highlight_visible_rows(
     viewport_rows: usize,
     scrollback_len: usize,
 ) -> Range<usize> {
+    if let Some(rows) =
+        terminal_projected_highlight_rows(snapshot, display_offset, viewport_rows, 0)
+    {
+        return rows;
+    }
     if let Some(rows) = terminal_logical_highlight_rows(snapshot, display_offset, viewport_rows, 0)
     {
         return rows;
@@ -2932,6 +3010,34 @@ fn terminal_keyword_highlight_visible_rows(
     start..end
 }
 
+/// Highlight rows for a folded viewport. Painting walks the fold projection,
+/// so the scheduled window must cover the source rows it actually paints; the
+/// unfolded index misses the rows a collapse pulls into the viewport (#1259).
+fn terminal_projected_highlight_rows(
+    snapshot: &TerminalSnapshot,
+    display_offset: usize,
+    viewport_rows: usize,
+    prefetch_viewports: usize,
+) -> Option<Range<usize>> {
+    let projection = snapshot.display_rows.as_ref()?;
+    let viewport_rows = viewport_rows.max(1);
+    let extra_rows = viewport_rows.saturating_mul(prefetch_viewports);
+    let top = projection.top(display_offset, viewport_rows);
+    let start_display = top.saturating_sub(extra_rows);
+    let end_display = (top + viewport_rows + extra_rows).min(projection.rows());
+    let (source_start, _) = terminal_snapshot_absolute_window(snapshot)?;
+    let start = projection
+        .source_row(start_display)
+        .saturating_sub(source_start)
+        .min(snapshot.row_count());
+    let end = projection
+        .source_row(end_display)
+        .saturating_sub(source_start)
+        .min(snapshot.row_count())
+        .max(start);
+    Some(start..end)
+}
+
 fn terminal_keyword_highlight_prefetch_rows(
     snapshot: &TerminalSnapshot,
     display_offset: usize,
@@ -2939,6 +3045,14 @@ fn terminal_keyword_highlight_prefetch_rows(
     scrollback_len: usize,
     prefetch_viewports: usize,
 ) -> Range<usize> {
+    if let Some(rows) = terminal_projected_highlight_rows(
+        snapshot,
+        display_offset,
+        viewport_rows,
+        prefetch_viewports,
+    ) {
+        return rows;
+    }
     if let Some(rows) =
         terminal_logical_highlight_rows(snapshot, display_offset, viewport_rows, prefetch_viewports)
     {
@@ -3138,7 +3252,7 @@ impl Render for TerminalSurface {
                 "terminal surface geometry"
             );
         }
-        let gutter_enabled = self.show_line_numbers || self.show_timestamps;
+        let gutter_enabled = true;
         let previous_grid_bounds = self
             .painted_hit_test_geometry
             .and_then(|geometry| geometry.grid_bounds);
@@ -3242,7 +3356,7 @@ impl Render for TerminalSurface {
                 .max(terminal_line_number_digits(snapshot.as_ref()));
             let ts_w = gutter_metrics.timestamp_width;
             let ln_w = gutter_metrics.line_number_width;
-            let gutter_viewport_width = (gutter_metrics.total_width() - 10.0).max(1.0);
+            let gutter_viewport_width = gutter_metrics.total_width();
             let abs_start = snapshot
                 .total_rows
                 .saturating_sub(snapshot.display_offset)
@@ -3288,7 +3402,9 @@ impl Render for TerminalSurface {
                                 row,
                                 TerminalStripeMode::new(
                                     self.zebra_stripes_by_row,
-                                    self.painted_unwrapped.is_some(),
+                                    self.painted_unwrapped
+                                        .as_ref()
+                                        .is_some_and(|layout| layout.unwrapped),
                                 ),
                                 row_target,
                                 palette,
@@ -3300,8 +3416,18 @@ impl Render for TerminalSurface {
                 let labels = terminal_gutter_labels(
                     snapshot_row,
                     abs_start + line_index + 1,
-                    self.show_timestamps && line_index < labeled_row_count,
-                    self.show_line_numbers && line_index < labeled_row_count,
+                    self.show_timestamps
+                        && line_index < labeled_row_count
+                        && self
+                            .painted_unwrapped
+                            .as_ref()
+                            .is_none_or(|layout| layout.summary(display_row).is_none()),
+                    self.show_line_numbers
+                        && line_index < labeled_row_count
+                        && self
+                            .painted_unwrapped
+                            .as_ref()
+                            .is_none_or(|layout| layout.summary(display_row).is_none()),
                     line_number_digits,
                     &timestamp_formatter,
                 );
@@ -3314,7 +3440,7 @@ impl Render for TerminalSurface {
                         .line_height(px(cell_h))
                         .gap(px(gutter_metrics.gap_width))
                         .flex_none()
-                        .pr(px(8.))
+                        .pr(px(19.))
                         .text_color(rgb(palette.text_dimmed))
                         .when_some(zebra_color, |this, color| this.bg(color))
                         .font(surface_font.clone())
@@ -3334,11 +3460,9 @@ impl Render for TerminalSurface {
                     .min_h_0()
                     .w(px(gutter_viewport_width))
                     .flex_none()
-                    .mr(px(10.))
                     .overflow_hidden()
-                    .border_r_1()
-                    .border_color(rgb(palette.border))
-                    .child(gutter_rows),
+                    .child(gutter_rows)
+                    .child(self.command_rail(&snapshot, visual_y_offset, cell_h, cx)),
             )
         } else {
             None
@@ -3363,6 +3487,7 @@ impl Render for TerminalSurface {
                         .children(horizontal)
                         .overflow_hidden()
                         .child(grid)
+                        .children(self.command_summaries(&snapshot, cell_h))
                         .children(horizontal_bar)
                         .child(terminal_surface_grid_bounds_tracker(surface.clone())),
                 )
@@ -3383,6 +3508,7 @@ impl Render for TerminalSurface {
                         .children(horizontal)
                         .overflow_hidden()
                         .child(grid)
+                        .children(self.command_summaries(&snapshot, cell_h))
                         .children(horizontal_bar)
                         .child(terminal_surface_grid_bounds_tracker(surface)),
                 )

@@ -9264,3 +9264,111 @@ fn android_connections_and_adb_path_survive_database_reopen() {
     drop(store);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn default_session_settings_round_trip_per_kind_and_reject_non_objects() {
+    let dir = unique_temp_dir("default-session-settings");
+    let store = ConnectionStore::open(&dir).unwrap();
+    assert_eq!(store.load_default_session_settings().unwrap(), None);
+
+    let ssh = serde_json::json!({"name": "", "type": "ssh", "host":"example.invalid", "port":22});
+    let telnet =
+        serde_json::json!({"name": "", "type":"telnet", "host":"example.invalid", "port": 23});
+    store.save_default_session_settings("ssh", &ssh).unwrap();
+    store
+        .save_default_session_settings("telnet", &telnet)
+        .unwrap();
+
+    let stored = store.load_default_session_settings().unwrap().unwrap();
+    assert_eq!(stored["ssh"]["port"], 22);
+    assert_eq!(stored["telnet"]["port"], 23);
+
+    // Saving one kind preserves the sibling entry and round-trips values.
+    let updated_ssh =
+        serde_json::json!({"name": "", "type":"ssh", "host":"example.invalid", "port": 2222});
+    store
+        .save_default_session_settings("ssh", &updated_ssh)
+        .unwrap();
+    let stored = store.load_default_session_settings().unwrap().unwrap();
+    assert_eq!(stored["ssh"]["port"], 2222);
+    assert_eq!(stored["telnet"]["port"], 23);
+
+    assert!(
+        store
+            .save_default_session_settings("bad", &serde_json::json!([1, 2]))
+            .is_err()
+    );
+    assert_eq!(
+        store.load_default_session_settings().unwrap().unwrap(),
+        stored
+    );
+
+    drop(store);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn default_session_settings_survive_backup_restore_with_unknown_protocols() {
+    let root = unique_temp_dir("defaults-backup");
+    let store = ConnectionStore::open(&root).unwrap();
+    let defaults = serde_json::json!({
+        "ssh":{"type":"ssh","name":"", "host":"", "future":{"nested":7}},
+        "future_protocol":{"opaque":[1,2,3]}
+    });
+    let mut value = store.load_settings_value().unwrap();
+    value["default_session"] = defaults.clone();
+    store.save_settings_value(&value).unwrap();
+    let mut snapshot = store
+        .build_raw_portable_snapshot(
+            nyaterm_core::portable_snapshot::PortableSnapshotKind::Backup,
+            "defaults-test",
+            "2.0.0",
+        )
+        .unwrap();
+    snapshot.recalculate_hash().unwrap();
+    let bytes = crate::portable_codec::encode_raw_portable_snapshot(&snapshot).unwrap();
+    let decoded = crate::portable_codec::decode_raw_portable_snapshot(&bytes).unwrap();
+    value.as_object_mut().unwrap().remove("default_session");
+    store.save_settings_value(&value).unwrap();
+    store.apply_raw_portable_snapshot(&decoded).unwrap();
+    assert_eq!(
+        store.load_default_session_settings().unwrap(),
+        Some(defaults)
+    );
+    drop(store);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn default_session_batch_commits_all_protocols_or_preserves_the_entire_catalog() {
+    let root = TestTempDir::new("nyaterm-default-session-batch");
+    let store = ConnectionStore::open(root.path()).unwrap();
+    let ssh = serde_json::json!({"id":"defaults", "name":"", "type":"ssh", "host":"localhost", "port":22, "encoding":"UTF-8", "future":{"version":8}});
+    let telnet = serde_json::json!({"id":"defaults", "name":"", "type":"telnet", "host":"localhost", "port":23, "encoding":"UTF-8"});
+    store
+        .save_default_session_settings_batch(&[
+            ("ssh".into(), ssh.clone()),
+            ("telnet".into(), telnet.clone()),
+        ])
+        .unwrap();
+    let before = store.load_default_session_settings().unwrap();
+    let mut changed = ssh.clone();
+    changed["encoding"] = serde_json::json!("GBK");
+    changed.as_object_mut().unwrap().remove("future");
+    assert!(
+        store
+            .save_default_session_settings_batch(&[
+                ("ssh".into(), changed.clone()),
+                ("telnet".into(), serde_json::json!({"type":"ssh"}))
+            ])
+            .is_err()
+    );
+    assert_eq!(store.load_default_session_settings().unwrap(), before);
+    store
+        .save_default_session_settings_batch(&[("ssh".into(), changed), ("telnet".into(), telnet)])
+        .unwrap();
+    let after = store.load_default_session_settings().unwrap().unwrap();
+    assert_eq!(after["ssh"]["encoding"], "GBK");
+    assert_eq!(after["ssh"]["future"]["version"], 8);
+    assert_eq!(after["telnet"], before.unwrap()["telnet"]);
+}

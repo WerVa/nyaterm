@@ -319,6 +319,7 @@ impl NyaTermApp {
         self.start_session_start_event_drain(cx);
         self.start_credential_autofill_match_drain(cx);
         self.start_remote_desktop_event_drain(cx);
+        self.observe_remote_desktop_window_visibility(window, cx);
         self.start_prompt_activation_drain(window, cx);
         self.start_shell_persistence_debounce(cx);
         // The restored panel width decides which process-table sort columns exist, and
@@ -1216,6 +1217,7 @@ impl NyaTermApp {
         if self.transfer.finish_browser_drag_selection() {
             cx.notify();
         }
+        self.transfer.cancel_browser_selection_click();
     }
 
     /// Whether the main window should be held back for a modal child window.
@@ -1621,6 +1623,8 @@ mod tests {
 
     fn root_render_benchmark_session(name: String) -> SessionRuntimeMetadata {
         SessionRuntimeMetadata {
+            confirmed_ssh_runtime_mode: None,
+            pending_ssh_startup_command: None,
             ssh_config: None,
             ssh_multiplex_key: None,
             source_connection_id: None,

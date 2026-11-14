@@ -465,8 +465,7 @@ impl NyaTermApp {
                     session_manager
                         .create_adb_session_with_cancel(
                             nyaterm_transport::adb_shell::AdbShellConfig {
-                                name: rust_i18n::t!("android.shellTitle", name = config.name)
-                                    .into_owned(),
+                                name: config.name.clone(),
                                 binding: config.binding.clone(),
                                 cols: config.cols,
                                 rows: config.rows,
@@ -517,7 +516,6 @@ impl NyaTermApp {
         if !self.session.start.request_can_start(&options) {
             return;
         }
-        config.runtime_mode = config.effective_runtime_mode();
         if let Some(mode) = options.ssh_runtime_mode {
             config.runtime_mode = mode;
         }
@@ -662,7 +660,6 @@ impl NyaTermApp {
         if !self.session.start.request_can_start(&options) {
             return;
         }
-        config.runtime_mode = config.effective_runtime_mode();
         let mut options = options;
         if let Some(mode) = options.ssh_runtime_mode {
             config.runtime_mode = mode;
@@ -959,21 +956,21 @@ impl NyaTermApp {
                     .map(|pending| pending.ai_execution_profile)
                     .unwrap_or(AiExecutionProfile::SendOnly);
                 let ai_execution_profile = if ssh_config.as_ref().is_some_and(|config| {
-                    config.effective_runtime_mode()
-                        == nyaterm_core::models::ssh_runtime::SshRuntimeMode::Sftp
+                    config.runtime_mode == nyaterm_core::models::ssh_runtime::SshRuntimeMode::Sftp
                 }) {
                     AiExecutionProfile::Disabled
                 } else {
                     ai_execution_profile
                 };
                 if ssh_config.as_ref().is_some_and(|config| {
-                    config.effective_runtime_mode()
-                        == nyaterm_core::models::ssh_runtime::SshRuntimeMode::Sftp
+                    config.runtime_mode == nyaterm_core::models::ssh_runtime::SshRuntimeMode::Sftp
                 }) && let Some(pending) = pending.as_mut()
                 {
                     pending.startup_command = None;
                 }
                 let metadata = SessionRuntimeMetadata {
+                    confirmed_ssh_runtime_mode: None,
+                    pending_ssh_startup_command: None,
                     ssh_config,
                     ssh_multiplex_key,
                     source_connection_id: source_connection_id.clone(),
@@ -1311,7 +1308,7 @@ fn create_session_from_launch_config(
     match launch_config {
         SessionLaunchConfig::AdbShell(config) => session_manager
             .create_adb_session(nyaterm_transport::adb_shell::AdbShellConfig {
-                name: rust_i18n::t!("android.shellTitle", name = config.name).into_owned(),
+                name: config.name.clone(),
                 binding: config.binding.clone(),
                 cols: config.cols,
                 rows: config.rows,

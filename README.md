@@ -33,7 +33,7 @@
   &nbsp;
   <a href="#"><img alt="Platform" src="https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-0EA5E9?style=flat-square&logo=linux&labelColor=334155"></a>
   &nbsp;
-  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-MIT-0EA5E9?style=flat-square&logo=readthedocs&labelColor=334155"></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-Apache%202.0-0EA5E9?style=flat-square&logo=readthedocs&labelColor=334155"></a>
 </p>
 
 <p align="center">
@@ -357,6 +357,7 @@ cargo run -p nyaterm-app --bin nyaterm
 │   ├── nyaterm-desktop/         # GPUI application composition and feature state
 │   ├── nyaterm-core/            # UI-independent domain models and policies
 │   ├── nyaterm-terminal/        # Terminal state machine and parsing
+│   ├── nyaterm-terminal-runtime/ # Frame worker, search, and session event routing
 │   ├── nyaterm-terminal-gpui/   # GPUI terminal layout, input, and painting
 │   ├── nyaterm-transport/       # SSH, PTY, SFTP, Telnet, Serial, and transfers
 │   ├── nyaterm-store/           # Persistence and database compatibility
@@ -413,4 +414,4 @@ If NyaTerm helps your daily development, operations, or remote terminal workflow
 <a name="license"></a>
 # License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the [Apache License 2.0](LICENSE).

@@ -15,6 +15,8 @@ struct Peer {
     channels: Vec<russh::Channel<server::Msg>>,
     signals: Arc<AtomicUsize>,
     ignore_int: bool,
+    allow_shell: bool,
+    reject_next_shell: bool,
 }
 impl server::Handler for Peer {
     type Error = russh::Error;
@@ -37,8 +39,19 @@ impl server::Handler for Peer {
         command: &[u8],
         session: &mut server::Session,
     ) -> Result<(), Self::Error> {
+        if command == b"reject" {
+            session.channel_failure(id)?;
+            session.close(id)?;
+            return Ok(());
+        }
         session.channel_success(id)?;
         match command {
+            b"reject_next_shell" => {
+                self.reject_next_shell = true;
+                session.exit_status_request(id, 0)?;
+                session.eof(id)?;
+                session.close(id)?;
+            }
             b"eof_first" => {
                 session.data(id, b"before eof".to_vec())?;
                 session.eof(id)?;
@@ -70,7 +83,15 @@ impl server::Handler for Peer {
         id: ChannelId,
         session: &mut server::Session,
     ) -> Result<(), Self::Error> {
-        session.channel_success(id)?;
+        assert!(
+            self.allow_shell,
+            "background transport must never request a shell"
+        );
+        if std::mem::take(&mut self.reject_next_shell) {
+            session.channel_failure(id)?;
+        } else {
+            session.channel_success(id)?;
+        }
         Ok(())
     }
     async fn pty_request(
@@ -84,6 +105,10 @@ impl server::Handler for Peer {
         _: &[(russh::Pty, u32)],
         session: &mut server::Session,
     ) -> Result<(), Self::Error> {
+        assert!(
+            self.allow_shell,
+            "background transport must never request a PTY"
+        );
         session.channel_success(id)?;
         Ok(())
     }
@@ -240,6 +265,16 @@ async fn peer() -> (
     Arc<AtomicUsize>,
     tokio::task::JoinHandle<()>,
 ) {
+    peer_with_shell(true).await
+}
+
+async fn peer_with_shell(
+    allow_shell: bool,
+) -> (
+    SshSessionConfig,
+    Arc<AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let signals = Arc::new(AtomicUsize::new(0));
@@ -263,6 +298,8 @@ async fn peer() -> (
                 channels: Vec::new(),
                 signals: count,
                 ignore_int: false,
+                allow_shell,
+                reject_next_shell: false,
             },
         )
         .await
@@ -281,6 +318,109 @@ async fn peer() -> (
         signals,
         worker,
     )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_multiplex_reuses_one_transport_and_cancels_only_its_channel() {
+    use nyaterm_transport::open_ssh_multiplex_handle;
+
+    let (config, signals, peer) = peer_with_shell(false).await;
+    let dial_config = config.clone();
+    let multiplex = tokio::task::spawn_blocking(move || open_ssh_multiplex_handle(dial_config))
+        .await
+        .unwrap()
+        .unwrap();
+    for _ in 0..20 {
+        let (tx, mut rx) = mpsc::channel(64);
+        stream_ssh_command(
+            config.clone(),
+            Some(multiplex.clone()),
+            b"exit_first".to_vec(),
+            Duration::from_secs(3),
+            CancellationToken::new(),
+            tx,
+        )
+        .await;
+        let mut output = Vec::new();
+        let mut confirmed = false;
+        while let Some(event) = rx.recv().await {
+            match event {
+                SshExecEvent::Output { data, .. } => output.extend(data),
+                SshExecEvent::Finished {
+                    confirmed: value, ..
+                } => confirmed = value,
+                _ => {}
+            }
+        }
+        assert!(confirmed);
+        assert_eq!(output, b"tail after exit");
+    }
+    assert_eq!(
+        config.attempt.shell_availability(),
+        nyaterm_transport::connection_attempt::ShellAvailability::Unknown
+    );
+    assert_eq!(
+        multiplex.shell_availability(),
+        nyaterm_transport::connection_attempt::ShellAvailability::Unknown
+    );
+    let (tx, mut rx) = mpsc::channel(64);
+    let interrupt = CancellationToken::new();
+    let running = tokio::spawn(stream_ssh_command(
+        config.clone(),
+        Some(multiplex.clone()),
+        b"wait_int".to_vec(),
+        Duration::from_secs(5),
+        interrupt.clone(),
+        tx,
+    ));
+    loop {
+        match tokio::time::timeout(Duration::from_secs(6), rx.recv())
+            .await
+            .unwrap()
+        {
+            Some(SshExecEvent::Started) => break,
+            Some(_) => {}
+            None => panic!("background command did not start"),
+        }
+    }
+    let (tx, mut independent) = mpsc::channel(64);
+    let concurrent = tokio::spawn(stream_ssh_command(
+        config,
+        Some(multiplex.clone()),
+        b"exit_first".to_vec(),
+        Duration::from_secs(5),
+        CancellationToken::new(),
+        tx,
+    ));
+    interrupt.cancel();
+    let mut stopped = false;
+    while let Some(event) = rx.recv().await {
+        if matches!(event, SshExecEvent::ExitStatus(130)) {
+            stopped = true;
+        }
+    }
+    let mut output = Vec::new();
+    let mut independent_exit = false;
+    while let Some(event) = independent.recv().await {
+        match event {
+            SshExecEvent::Output { data, .. } => output.extend(data),
+            SshExecEvent::ExitStatus(0) => independent_exit = true,
+            _ => {}
+        }
+    }
+    running.await.unwrap();
+    concurrent.await.unwrap();
+    assert!(stopped && independent_exit);
+    assert_eq!(output, b"tail after exit");
+    assert_eq!(signals.load(Ordering::SeqCst), 1);
+    assert!(!multiplex.is_closed());
+    tokio::task::spawn_blocking(move || multiplex.disconnect().unwrap())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), peer)
+        .await
+        .unwrap()
+        .unwrap();
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancellation_before_submission_never_opens_an_ssh_connection() {
@@ -417,4 +557,143 @@ async fn legacy_synchronous_exec_also_waits_for_exit_status_after_eof() {
         .await
         .unwrap()
         .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exec_rejection_and_timeout_leave_established_shell_available() {
+    use nyaterm_core::models::ssh_runtime::SshRuntimeMode;
+    use nyaterm_transport::connection_attempt::ShellAvailability;
+    use nyaterm_transport::ssh_execution::{ExecRequestDenied, exec_ssh_command_with_multiplex};
+    use nyaterm_transport::{SessionEvent, SessionManager, open_ssh_multiplex_handle};
+    for deferred in [false, true] {
+        let (mut config, _, server) = peer().await;
+        config.deferred_pty = deferred;
+        config.terminal_shell_integration = false;
+        config.sftp.cwd_follow_mode = nyaterm_transport::SftpCwdFollowMode::Off;
+        let start_config = config.clone();
+        let (manager, session, multiplex) = tokio::task::spawn_blocking(move || {
+            let multiplex = open_ssh_multiplex_handle(start_config.clone()).unwrap();
+            let manager = SessionManager::new();
+            let session = manager
+                .create_ssh_session_with_multiplex(start_config, multiplex.clone())
+                .unwrap();
+            (manager, session, multiplex)
+        })
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let events = manager.drain_events(64).unwrap().events;
+                if events.iter().any(|event| {
+                    matches!(
+                        event,
+                        SessionEvent::SshRuntimeModeConfirmed {
+                            mode: SshRuntimeMode::Standard,
+                            ..
+                        }
+                    )
+                }) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        for command in [b"reject".as_slice(), b"wait", b"exit_first"] {
+            let result = exec_ssh_command_with_multiplex(
+                config.clone(),
+                multiplex.clone(),
+                command.to_vec(),
+                Duration::from_millis(300),
+            )
+            .await;
+            if command == b"reject" {
+                assert!(result.unwrap_err().is::<ExecRequestDenied>());
+            } else if command == b"wait" {
+                assert!(result.is_err());
+            } else {
+                assert!(result.is_ok());
+            }
+            assert_eq!(
+                config.attempt.shell_availability(),
+                ShellAvailability::Available
+            );
+            assert_eq!(multiplex.shell_availability(), ShellAvailability::Available);
+            let (tx, mut rx) = mpsc::channel(64);
+            stream_ssh_command(
+                config.clone(),
+                Some(multiplex.clone()),
+                command.to_vec(),
+                Duration::from_millis(300),
+                CancellationToken::new(),
+                tx,
+            )
+            .await;
+            let mut failed = false;
+            while let Some(event) = rx.recv().await {
+                failed |= matches!(event, SshExecEvent::Failed | SshExecEvent::TimedOut);
+            }
+            assert_eq!(failed, command != b"exit_first");
+            assert_eq!(
+                config.attempt.shell_availability(),
+                ShellAvailability::Available
+            );
+            assert_eq!(multiplex.shell_availability(), ShellAvailability::Available);
+        }
+        exec_ssh_command_with_multiplex(
+            config.clone(),
+            multiplex.clone(),
+            b"reject_next_shell".to_vec(),
+            Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+        let mut other_config = config.clone();
+        other_config.bind_attempt(Default::default());
+        other_config.deferred_pty = false;
+        other_config.runtime_mode = SshRuntimeMode::Terminal;
+        let other_multiplex = multiplex.clone();
+        let second = tokio::task::spawn_blocking(move || {
+            SessionManager::new().create_ssh_session_with_multiplex(other_config, other_multiplex)
+        })
+        .await
+        .unwrap();
+        assert!(second.is_err());
+        // The shared connection has now seen a rejected shell on another channel.
+        // The already established terminal must still accept input.
+        manager
+            .write_raw(&session.id, b"still-interactive")
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut output = Vec::new();
+            loop {
+                for event in manager.drain_events(64).unwrap().events {
+                    match event {
+                        SessionEvent::Output { data, .. } => output.extend(data),
+                        SessionEvent::SshRuntimeModeConfirmed { .. } => {
+                            panic!("mode confirmed twice")
+                        }
+                        _ => {}
+                    }
+                }
+                if output
+                    .windows(17)
+                    .any(|bytes| bytes == b"still-interactive")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::task::spawn_blocking(move || {
+            manager.close(&session.id).unwrap();
+            multiplex.disconnect().unwrap();
+        })
+        .await
+        .unwrap();
+        server.abort();
+    }
 }

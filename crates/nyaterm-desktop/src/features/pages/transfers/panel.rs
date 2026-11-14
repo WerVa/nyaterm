@@ -1,8 +1,8 @@
 use super::TransferBrowserAvailability;
 use crate::features::NyaTermApp;
 use crate::models::{
-    TransferBrowserColumnResizeState, TransferBrowserColumnWidths, TransferBrowserSortColumn,
-    TransferBrowserSortDirection, TransferJobRowSnapshot, TransferRenameState,
+    TransferBrowserColumnResizeState, TransferBrowserColumnWidths, TransferJobRowSnapshot,
+    TransferRenameState,
 };
 use crate::theme::ThemePalette;
 use gpui::{
@@ -10,6 +10,7 @@ use gpui::{
     WeakEntity, Window,
 };
 use nyaterm_core::TransferBrowserViewMode;
+use nyaterm_files::file_browser::listing::{FileBrowserSortColumn, FileBrowserSortDirection};
 use nyaterm_files::sftp::SftpFileEntry;
 use nyaterm_ui::NyaInputState;
 use std::collections::{HashSet, VecDeque};
@@ -36,10 +37,6 @@ pub(in crate::features) struct TransferChrome {
 /// it. The costly field -- the listing -- is shared rather than copied; the rest are
 /// short paths and small sets.
 pub(in crate::features) struct TransferBrowserPresentation {
-    pub sudo: Option<(
-        String,
-        crate::features::session::remote_files::FilePrivilegeStatus,
-    )>,
     pub view_mode: TransferBrowserViewMode,
     pub tree: crate::features::transfers::TransferTreePresentation,
     pub tree_focus: FocusHandle,
@@ -62,8 +59,8 @@ pub(in crate::features) struct TransferBrowserPresentation {
     pub horizontal_scroll: ScrollHandle,
     pub visited_history: VecDeque<String>,
     pub favorites: VecDeque<String>,
-    pub sort_column: TransferBrowserSortColumn,
-    pub sort_direction: TransferBrowserSortDirection,
+    pub sort_column: FileBrowserSortColumn,
+    pub sort_direction: FileBrowserSortDirection,
     pub column_widths: TransferBrowserColumnWidths,
     pub column_resize: Option<TransferBrowserColumnResizeState>,
     pub selected_remote_path: Option<String>,
@@ -346,6 +343,8 @@ mod tests {
                 app.session.register_session_metadata(
                     "path-test",
                     crate::models::SessionRuntimeMetadata {
+                        confirmed_ssh_runtime_mode: None,
+                        pending_ssh_startup_command: None,
                         ssh_config: None,
                         ssh_multiplex_key: None,
                         source_connection_id: None,
@@ -380,6 +379,195 @@ mod tests {
     }
 
     #[test]
+    fn file_row_ctrl_toggle_and_plain_click_update_the_selection() {
+        for remote in [false, true] {
+            for name_column in [false, true] {
+                let test_dir = TestConfigDir::new("nyaterm-file-selection");
+                let mut cx = TestAppContext::single();
+                let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+                let (app, vcx) = hosted_file_browser(&mut cx, test_dir.path());
+                let entries: Vec<_> = (0..4)
+                    .map(super::super::tests_support::browser_entry)
+                    .collect();
+                vcx.update(|_, cx| {
+                    app.update(cx, |app, cx| {
+                        if remote {
+                            let config = nyaterm_transport::SshSessionConfig::default();
+                            app.session.register_session_metadata(
+                                "path-test",
+                                crate::models::SessionRuntimeMetadata {
+                                    confirmed_ssh_runtime_mode: None,
+                                    pending_ssh_startup_command: None,
+                                    ssh_config: Some(config.clone()),
+                                    ssh_multiplex_key: None,
+                                    source_connection_id: None,
+                                    ai_execution_profile: nyaterm_core::AiExecutionProfile::Posix,
+                                    launch_config: crate::models::SessionLaunchConfig::Ssh(
+                                        Box::new(config),
+                                    ),
+                                    disconnected: false,
+                                },
+                            );
+                        }
+                        app.transfer
+                            .replace_browser_entries_for_test(entries.clone());
+                        app.transfer.replace_browser_selection(
+                            entries
+                                .iter()
+                                .take(3)
+                                .map(nyaterm_files::sftp::SftpFileEntry::identity_key)
+                                .collect(),
+                            Some(entries[0].identity_key()),
+                        );
+                        app.flush_transfer_panel_snapshot(cx);
+                    });
+                });
+                draw_path_fixture(vcx);
+                let row = vcx
+                    .debug_bounds("transfer-browser-entry-/remote/entry-0000")
+                    .unwrap();
+                let pointer = gpui::point(
+                    row.left() + px(if name_column { 80. } else { 280. }),
+                    row.center().y,
+                );
+                let ctrl = Modifiers {
+                    control: true,
+                    ..Modifiers::none()
+                };
+                vcx.simulate_mouse_move(pointer, None, ctrl);
+                vcx.simulate_mouse_down(pointer, MouseButton::Left, ctrl);
+                draw_path_fixture(vcx);
+                // Even a small move with the button down must not reselect A.
+                vcx.simulate_mouse_move(
+                    pointer + gpui::point(px(1.), px(0.)),
+                    MouseButton::Left,
+                    ctrl,
+                );
+                vcx.simulate_mouse_up(pointer, MouseButton::Left, ctrl);
+                draw_path_fixture(vcx);
+                vcx.update(|_, cx| {
+                    let app = app.read(cx);
+                    let browser = app.transfer.browser_view();
+                    assert_eq!(
+                        browser.selected_remote_paths,
+                        &std::collections::HashSet::from([
+                            entries[1].identity_key(),
+                            entries[2].identity_key()
+                        ])
+                    );
+                    assert_eq!(
+                        browser.selected_remote_path.as_deref(),
+                        Some(entries[1].path.as_str())
+                    );
+                    assert!(!app.transfer.rename_dialog_is_open());
+                });
+                vcx.simulate_click(pointer, ctrl);
+                draw_path_fixture(vcx);
+                vcx.simulate_mouse_down(pointer, MouseButton::Left, Modifiers::none());
+                vcx.update(|_, cx| {
+                    assert_eq!(
+                        app.read(cx)
+                            .transfer
+                            .browser_view()
+                            .selected_remote_paths
+                            .len(),
+                        3
+                    )
+                });
+                vcx.simulate_mouse_up(pointer, MouseButton::Left, Modifiers::none());
+                draw_path_fixture(vcx);
+                vcx.update(|_, cx| {
+                    let app = app.read(cx);
+                    assert_eq!(
+                        app.transfer.browser_view().selected_remote_paths,
+                        &std::collections::HashSet::from([entries[0].identity_key()])
+                    );
+                    assert!(
+                        !app.transfer.rename_dialog_is_open(),
+                        "collapsing a multi-selection must not rename"
+                    );
+                });
+                let last_row = vcx
+                    .debug_bounds("transfer-browser-entry-/remote/entry-0002")
+                    .unwrap();
+                let last = gpui::point(pointer.x, last_row.center().y);
+                vcx.simulate_click(
+                    last,
+                    Modifiers {
+                        shift: true,
+                        ..Modifiers::none()
+                    },
+                );
+                draw_path_fixture(vcx);
+                vcx.update(|_, cx| {
+                    assert_eq!(
+                        app.read(cx)
+                            .transfer
+                            .browser_view()
+                            .selected_remote_paths
+                            .len(),
+                        3
+                    )
+                });
+                // Ctrl+Shift extends the existing selection with the next range.
+                let last_row = vcx
+                    .debug_bounds("transfer-browser-entry-/remote/entry-0003")
+                    .unwrap();
+                vcx.simulate_click(
+                    gpui::point(pointer.x, last_row.center().y),
+                    Modifiers {
+                        shift: true,
+                        control: true,
+                        ..Modifiers::none()
+                    },
+                );
+                draw_path_fixture(vcx);
+                vcx.update(|_, cx| {
+                    assert_eq!(
+                        app.read(cx)
+                            .transfer
+                            .browser_view()
+                            .selected_remote_paths
+                            .len(),
+                        4
+                    )
+                });
+                // Crossing rows activates range selection, including when the
+                // pointer subsequently returns to the original pressed row.
+                vcx.simulate_mouse_down(pointer, MouseButton::Left, ctrl);
+                vcx.simulate_mouse_move(last, MouseButton::Left, ctrl);
+                vcx.simulate_mouse_move(pointer, MouseButton::Left, ctrl);
+                vcx.simulate_mouse_up(pointer, MouseButton::Left, ctrl);
+                draw_path_fixture(vcx);
+                vcx.update(|_, cx| {
+                    assert_eq!(
+                        app.read(cx)
+                            .transfer
+                            .browser_view()
+                            .selected_remote_paths
+                            .len(),
+                        4
+                    );
+                });
+                // Releasing outside the pressed row must abandon the deferred
+                // click rather than collapse the selection on a later event.
+                vcx.simulate_mouse_down(pointer, MouseButton::Left, Modifiers::none());
+                vcx.simulate_mouse_up(last, MouseButton::Left, Modifiers::none());
+                draw_path_fixture(vcx);
+                vcx.update(|_, cx| {
+                    app.update(cx, |app, _| {
+                        assert_eq!(app.transfer.browser_view().selected_remote_paths.len(), 4);
+                        assert!(
+                            !app.transfer
+                                .consume_browser_selection_click(&entries[0].identity_key())
+                        );
+                    });
+                });
+            }
+        }
+    }
+
+    #[test]
     fn file_row_starts_visible_export_from_first_press_and_preserves_multiselection() {
         for remote in [false, true] {
             let test_dir = TestConfigDir::new("nyaterm-file-drag");
@@ -396,6 +584,8 @@ mod tests {
                         app.session.register_session_metadata(
                             "path-test",
                             crate::models::SessionRuntimeMetadata {
+                                confirmed_ssh_runtime_mode: None,
+                                pending_ssh_startup_command: None,
                                 ssh_config: Some(config.clone()),
                                 ssh_multiplex_key: None,
                                 source_connection_id: None,
@@ -496,6 +686,18 @@ mod tests {
                 );
             });
             vcx.simulate_mouse_up(start, MouseButton::Left, Modifiers::none());
+            draw_path_fixture(vcx);
+            vcx.update(|_, cx| {
+                assert_eq!(
+                    app.read(cx)
+                        .transfer
+                        .browser_view()
+                        .selected_remote_paths
+                        .len(),
+                    2
+                );
+                assert!(!app.read(cx).transfer.rename_dialog_is_open());
+            });
         }
     }
 

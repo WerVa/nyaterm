@@ -34,8 +34,9 @@ use crate::features::{
         child_window_options, child_window_root, focus_child_window_shell_if_idle,
     },
 };
-use crate::models::{DelimitedSort, PreviewContent, PreviewDelimited, TransferPreviewState};
+use crate::models::{PreviewContent, TransferPreviewState};
 use crate::theme::ThemePalette;
+use nyaterm_preview::delimited::{DelimitedSort, PreviewDelimited};
 
 /// PDF-specific zoom bounds (50%–300%), narrower than the image bounds.
 const PDF_MIN_ZOOM: f32 = 0.5;
@@ -70,18 +71,24 @@ impl RemoteFilePreviewWindow {
     fn text_surface_for(
         &mut self,
         tab_id: &str,
+        path: &str,
         text: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<RemoteTextEditor> {
         if let Some(surface) = self.text_surface.clone() {
-            surface.update(cx, |surface, cx| surface.sync_read_only(tab_id, text, cx));
+            surface.update(cx, |surface, cx| {
+                surface.sync_read_only(tab_id, path, text, cx)
+            });
             return surface;
         }
         let app = self.app.clone();
         let id = tab_id.to_string();
         let content = text.to_string();
-        let surface = cx.new(|cx| RemoteTextEditor::new_read_only(app, id, content, window, cx));
+        // The tab ID can contain an opaque raw-path token. Only the display path
+        // carries the filename needed for syntax recognition.
+        let surface =
+            cx.new(|cx| RemoteTextEditor::new_read_only(app, id, path, content, window, cx));
         self.text_surface = Some(surface.clone());
         surface
     }
@@ -385,7 +392,7 @@ impl RemoteFilePreviewWindow {
         if is_delimited {
             let header_on = matches!(
                 &active_tab.content,
-                PreviewContent::Delimited(data) if data.first_row_is_header
+                PreviewContent::Delimited(data) if data.first_row_is_header()
             );
             toolbar = toolbar.child(self.toolbar_button(
                 palette,
@@ -613,11 +620,23 @@ impl RemoteFilePreviewWindow {
             }
             PreviewContent::Error(message) => error_message(palette, message),
             PreviewContent::Text(text) => {
-                let surface = self.text_surface_for(&active_tab.id, text, window, cx);
+                let surface = self.text_surface_for(
+                    &active_tab.id,
+                    &active_tab.remote_path,
+                    text,
+                    window,
+                    cx,
+                );
                 text_surface_body(surface)
             }
             PreviewContent::Json { text, parse_error } => {
-                let surface = self.text_surface_for(&active_tab.id, text, window, cx);
+                let surface = self.text_surface_for(
+                    &active_tab.id,
+                    &active_tab.remote_path,
+                    text,
+                    window,
+                    cx,
+                );
                 json_body(palette, surface, parse_error.as_deref())
             }
             PreviewContent::Markdown(text) => markdown_body(palette, text, active_tab.id.as_str()),
@@ -636,9 +655,9 @@ impl RemoteFilePreviewWindow {
         scroll_id: &str,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let headers = data.headers();
-        let column_count = data.column_count;
-        let sort = data.sort;
+        let headers = delimited_headers(data);
+        let column_count = data.column_count();
+        let sort = data.sort();
 
         // Clickable header row with tri-state sort indicators.
         let mut header_row = div()
@@ -730,7 +749,7 @@ impl RemoteFilePreviewWindow {
                     .vertical_scrollbar(&self.delimited_scroll),
             );
 
-        if data.truncated {
+        if data.truncated() {
             column = column.child(
                 div()
                     .px_2()
@@ -860,6 +879,16 @@ fn format_size_and_time(size: Option<u64>, modified_at: Option<u32>) -> String {
         (false, true) => size,
         (true, false) => time,
         (false, false) => format!("{size}  ·  {time}"),
+    }
+}
+
+fn delimited_headers(data: &PreviewDelimited) -> Vec<String> {
+    if data.first_row_is_header() {
+        data.header_row().unwrap_or_default().to_vec()
+    } else {
+        (1..=data.column_count())
+            .map(|column| format!("Column {column}"))
+            .collect()
     }
 }
 
@@ -1163,4 +1192,25 @@ fn open_remote_file_preview_window_now_from_app(app: Entity<NyaTermApp>, cx: &mu
             cx.notify();
         }
     });
+}
+
+#[cfg(test)]
+mod delimited_tests {
+    use super::delimited_headers;
+    use nyaterm_preview::delimited::PreviewDelimited;
+
+    #[test]
+    fn headers_preserve_empty_ragged_and_synthesized_labels() {
+        let mut data = PreviewDelimited::new(
+            vec![vec!["name".into()], vec!["a".into(), "1".into()]],
+            false,
+        );
+        assert_eq!(delimited_headers(&data), ["name"]);
+        data.toggle_header();
+        assert_eq!(delimited_headers(&data), ["Column 1", "Column 2"]);
+        let mut empty = PreviewDelimited::new(Vec::new(), false);
+        assert!(delimited_headers(&empty).is_empty());
+        empty.toggle_header();
+        assert_eq!(delimited_headers(&empty), ["Column 1"]);
+    }
 }

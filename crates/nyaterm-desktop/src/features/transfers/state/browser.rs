@@ -1,5 +1,6 @@
 //! SFTP browser navigation, selection, menu and column-layout transitions.
 
+use crate::models::transfer_ui::{browser_sort_column_label, browser_sort_direction_marker};
 use gpui::{Pixels, ScrollHandle, ScrollStrategy};
 use nyaterm_files::sftp::{RemoteFilePath, SftpFileEntry};
 use std::collections::{HashSet, VecDeque};
@@ -7,16 +8,17 @@ use std::sync::Arc;
 
 use super::browser_logic::BrowserFilterKey;
 use super::{TransferBrowserState, TransferBrowserView, TransferFeatureState};
-use crate::features::transfers::browser_paths::{
-    remote_ancestor_selection, transfer_browser_path_is_root,
-};
 #[cfg(test)]
 use crate::models::TransferBrowserPendingRenameState;
 use crate::models::{
     TransferBrowserColumnResizeState, TransferBrowserContextTarget,
     TransferBrowserDragSelectionState, TransferBrowserFavoritesMenuState,
     TransferBrowserNavigationSnapshot, TransferBrowserPathMenuState,
-    TransferBrowserSessionCacheState, TransferBrowserSortColumn, TransferBrowserUploadMenuState,
+    TransferBrowserSessionCacheState, TransferBrowserUploadMenuState,
+};
+use nyaterm_files::file_browser::listing::FileBrowserSortColumn;
+use nyaterm_files::file_browser::navigation::{
+    browser_path_is_root as transfer_browser_path_is_root, remote_ancestor_selection,
 };
 
 pub(in crate::features) struct TransferSessionTransferBundle {
@@ -314,7 +316,7 @@ impl TransferFeatureState {
 
     pub(in crate::features) fn start_browser_column_resize(
         &mut self,
-        column: TransferBrowserSortColumn,
+        column: FileBrowserSortColumn,
         position_x: Pixels,
     ) {
         self.browser.start_column_resize(column, position_x);
@@ -362,7 +364,7 @@ impl TransferFeatureState {
 
     pub(in crate::features) fn toggle_browser_sort(
         &mut self,
-        column: TransferBrowserSortColumn,
+        column: FileBrowserSortColumn,
     ) -> String {
         if self.browser.sort_column == column {
             self.browser.sort_direction = self.browser.sort_direction.toggled();
@@ -378,8 +380,8 @@ impl TransferFeatureState {
             .set_offset(Default::default());
         let status = format!(
             "sorted by {} {}",
-            self.browser.sort_column.label().to_lowercase(),
-            self.browser.sort_direction.marker()
+            browser_sort_column_label(self.browser.sort_column).to_lowercase(),
+            browser_sort_direction_marker(self.browser.sort_direction)
         );
         self.browser.status = status.clone();
         status
@@ -524,6 +526,7 @@ impl TransferFeatureState {
     }
 
     pub(in crate::features) fn begin_browser_directory_load_path(&mut self, path: RemoteFilePath) {
+        self.cancel_browser_selection_click();
         self.browser.list_scroll = gpui::UniformListScrollHandle::new();
         self.browser.horizontal_scroll = ScrollHandle::new();
         self.browser.path = path.display_path;
@@ -542,6 +545,7 @@ impl TransferFeatureState {
     }
 
     pub(in crate::features) fn begin_browser_parent_load(&mut self, path: String) {
+        self.cancel_browser_selection_click();
         self.browser.list_scroll = gpui::UniformListScrollHandle::new();
         self.browser.horizontal_scroll = ScrollHandle::new();
         self.browser.path = path;
@@ -647,6 +651,7 @@ impl TransferFeatureState {
     }
 
     pub(in crate::features) fn select_browser_entry(&mut self, path: String) {
+        self.cancel_browser_selection_click();
         self.browser.selected_remote_path = Some(path.clone());
         self.browser.selected_remote_paths.clear();
         self.browser.selected_remote_paths.insert(path);
@@ -657,12 +662,14 @@ impl TransferFeatureState {
         paths: HashSet<String>,
         active_path: Option<String>,
     ) -> usize {
+        self.cancel_browser_selection_click();
         self.browser.selected_remote_paths = paths;
         self.browser.selected_remote_path = active_path;
         self.browser.selected_remote_paths.len()
     }
 
     pub(in crate::features) fn clear_browser_selection(&mut self) {
+        self.cancel_browser_selection_click();
         self.browser.selected_remote_path = None;
         self.browser.selected_remote_paths.clear();
     }
@@ -671,6 +678,7 @@ impl TransferFeatureState {
         &mut self,
         target: TransferBrowserContextTarget,
     ) {
+        self.cancel_browser_selection_click();
         self.browser.context_target = target;
         self.browser.cancel_pending_rename();
     }
@@ -714,15 +722,44 @@ impl TransferFeatureState {
     pub(in crate::features) fn toggle_browser_path_mark(&mut self, path: String) -> usize {
         if !self.browser.selected_remote_paths.remove(&path) {
             self.browser.selected_remote_paths.insert(path.clone());
+            self.browser.selected_remote_path = Some(path);
+        } else if !self
+            .browser
+            .selected_remote_path
+            .as_ref()
+            .is_some_and(|active| self.browser.selected_remote_paths.contains(active))
+        {
+            self.browser.selected_remote_path = self
+                .browser
+                .entries
+                .iter()
+                .map(SftpFileEntry::identity_key)
+                .find(|identity| self.browser.selected_remote_paths.contains(identity));
         }
-        self.browser.selected_remote_path = Some(path);
         self.browser.selected_remote_paths.len()
+    }
+
+    pub(in crate::features) fn defer_browser_selection_click(&mut self, path: String) {
+        self.browser.pending_selection_click = Some(path);
+    }
+
+    pub(in crate::features) fn consume_browser_selection_click(&mut self, path: &str) -> bool {
+        if self.browser.pending_selection_click.as_deref() != Some(path) {
+            return false;
+        }
+        self.browser.pending_selection_click = None;
+        true
+    }
+
+    pub(in crate::features) fn cancel_browser_selection_click(&mut self) {
+        self.browser.pending_selection_click = None;
     }
 
     pub(in crate::features) fn set_browser_drag_selection(
         &mut self,
         selection: TransferBrowserDragSelectionState,
     ) {
+        self.cancel_browser_selection_click();
         self.browser.drag_selection = Some(selection);
     }
 
@@ -799,6 +836,7 @@ impl TransferFeatureState {
 /// other app state; the page-level handlers are forwarders that own the redraw.
 impl TransferBrowserState {
     fn clear_interaction(&mut self) {
+        self.pending_selection_click = None;
         self.selected_remote_path = None;
         self.selected_remote_paths.clear();
         self.drag_selection = None;
@@ -846,6 +884,7 @@ impl TransferBrowserState {
     }
 
     fn restore_navigation(&mut self, snapshot: TransferBrowserNavigationSnapshot) {
+        self.pending_selection_click = None;
         self.path = snapshot.browser_path;
         self.raw_path_token = snapshot.browser_raw_path_token;
         self.entries = snapshot.entries;
@@ -880,13 +919,16 @@ impl TransferBrowserState {
         self.status = "remote directory path edit cancelled".to_string();
     }
 
-    fn start_column_resize(&mut self, column: TransferBrowserSortColumn, position_x: Pixels) {
+    fn start_column_resize(&mut self, column: FileBrowserSortColumn, position_x: Pixels) {
         self.column_resize = Some(TransferBrowserColumnResizeState {
             column,
             start_x: position_x,
             start_width: self.column_widths.get(column),
         });
-        self.status = format!("resizing {} column", column.label().to_lowercase());
+        self.status = format!(
+            "resizing {} column",
+            browser_sort_column_label(column).to_lowercase()
+        );
     }
 
     /// Returns false when no resize is in flight, so the caller can skip the redraw.
@@ -897,7 +939,10 @@ impl TransferBrowserState {
         let next_width = state.start_width + (position_x - state.start_x);
         self.column_widths.set(state.column, next_width);
         let width = f32::from(self.column_widths.get(state.column)).round();
-        self.status = format!("{} column: {width}px", state.column.label().to_lowercase());
+        self.status = format!(
+            "{} column: {width}px",
+            browser_sort_column_label(state.column).to_lowercase()
+        );
         true
     }
 

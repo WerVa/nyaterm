@@ -4,6 +4,7 @@ use std::sync::{Arc, OnceLock};
 
 use gpui::FontFeatures;
 
+pub mod command_blocks;
 pub mod decorations;
 pub mod ime;
 pub mod scrollbar;
@@ -17,7 +18,7 @@ pub mod geometry;
 mod glyphs;
 mod images;
 mod input;
-mod keywords;
+pub mod keywords;
 mod paint;
 mod paint_mask;
 pub mod render_cache;
