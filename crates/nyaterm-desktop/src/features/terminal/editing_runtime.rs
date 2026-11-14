@@ -6,9 +6,7 @@ use zeroize::Zeroize;
 
 use gpui::Context;
 use nyaterm_core::command_starts_suggestion_suppressing_program;
-use nyaterm_core::command_suggestion_suppression::{
-    command_enters_foreign_shell, command_leaves_shell, command_starts_line_editor,
-};
+use nyaterm_core::command_suggestion_suppression::command_starts_line_editor;
 use nyaterm_core::completion::types::ShellDialect;
 use nyaterm_core::terminal::editing::{
     EDIT_CONFIRMATION_TIMEOUT, EditCapability, EditPhase, ShellLineEditing,
@@ -45,6 +43,15 @@ impl NyaTermApp {
             return;
         };
         self.terminal.editing.activate(&id);
+        if self
+            .terminal
+            .editing
+            .state_mut()
+            .file_context
+            .note_input(bytes)
+        {
+            self.terminal.assist.path_completion.cancel_session(&id);
+        }
         self.terminal.editing.state_mut().suggestion_fill = None;
         let fallback = candidate.as_ref().and_then(|evidence| {
             self.terminal
@@ -109,25 +116,9 @@ impl NyaTermApp {
             self.terminal.assist.command_suggestion_suppression =
                 CommandSuggestionSuppression::None;
         }
-        // Ctrl+D on an empty line at a shell prompt ends that shell. While a
-        // program runs it only closes that program's stdin, so it is ignored.
-        if !was_suppressed
-            && text == "\u{4}"
-            && self.terminal.editing.predicted_input().value.is_empty()
-        {
-            self.terminal.editing.state_mut().foreign_shells.leave();
-        }
         if !was_suppressed && text.contains(['\r', '\n']) {
             let submitted = get_tracked_submission_command(self.terminal.editing.predicted_input());
             if !submitted.is_empty() {
-                let entered = command_enters_foreign_shell(&submitted);
-                let state = self.terminal.editing.state_mut();
-                if entered > 0 {
-                    let outer_prompt = state.line_editor_prompt.clone();
-                    state.foreign_shells.enter(entered, outer_prompt.as_deref());
-                } else if command_leaves_shell(&submitted) {
-                    state.foreign_shells.leave();
-                }
                 if command_starts_suggestion_suppressing_program(&submitted) {
                     self.terminal.assist.command_suggestion_suppression =
                         CommandSuggestionSuppression::InteractiveProgram;
@@ -236,7 +227,8 @@ impl NyaTermApp {
         self.terminal.editing.activate(id);
         if self.session.is_disconnected(id) {
             // A reconnect starts a fresh shell on the session's own host.
-            self.terminal.editing.state_mut().foreign_shells.reset();
+            self.terminal.editing.state_mut().file_context = Default::default();
+            self.terminal.assist.path_completion.cancel_session(id);
         }
         if self.session.is_disconnected(id)
             || self.active_terminal_uses_alternate_screen()
@@ -247,6 +239,27 @@ impl NyaTermApp {
             return;
         }
         let snapshot = self.terminal_snapshot_for_session(Some(id), 0);
+        let previous_context = self
+            .terminal
+            .editing
+            .state()
+            .and_then(|state| state.file_context.current())
+            .map(|context| context.cache_key());
+        self.terminal.editing.state_mut().file_context.observe(
+            snapshot
+                .shell_input_anchor
+                .and(snapshot.file_context.as_deref()),
+        );
+        let next_context = self
+            .terminal
+            .editing
+            .state()
+            .and_then(|state| state.file_context.current())
+            .map(|context| context.cache_key());
+        if previous_context != next_context {
+            self.terminal.assist.path_completion.cancel_session(id);
+        }
+
         self.terminal
             .editing
             .state_mut()
@@ -305,6 +318,7 @@ impl NyaTermApp {
         {
             let old_anchor = state.observed_anchor.flatten();
             let submitted = old_anchor.is_some() && old_anchor == state.submitted_anchor;
+
             state.invalidate();
             state.submitted_anchor = None;
             // OSC C may arrive after typing has already started in a child shell.
@@ -410,9 +424,6 @@ impl NyaTermApp {
                     }
                 });
             state.observe_editor_evidence(backend);
-            if let Some(prefix) = prompt.as_deref().filter(|prefix| !prefix.trim().is_empty()) {
-                state.foreign_shells.note_prompt(prefix);
-            }
             if state.echo_line_editor
                 && prompt
                     .as_ref()

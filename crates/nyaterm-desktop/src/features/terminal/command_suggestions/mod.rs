@@ -30,7 +30,8 @@ mod fill;
 mod fill_tests;
 mod helpers;
 pub(super) mod paste;
-mod path_source;
+pub(super) mod path_source;
+mod progressive;
 
 use self::fill::{SuggestionSubmitResult, suggestion_fill_rejection_message};
 use self::helpers::command_suggestion_highlight_parts;
@@ -97,6 +98,7 @@ struct CommandSuggestionRefreshTiming {
     hide_popup: Duration,
 }
 
+#[derive(Clone)]
 struct CommandSuggestionSearchRequest {
     request_id: u64,
     session_id: String,
@@ -146,26 +148,72 @@ fn command_suggestion_refresh_input_delay(
 fn merge_path_candidates(
     mut result: CompletionResult,
     paths: Vec<CompletionCandidate>,
-    source: &PathSource,
+    explicit_directory: bool,
     input: &str,
 ) -> CompletionResult {
     if paths.is_empty() {
         return result;
     }
-    let existing = std::mem::take(&mut result.candidates);
-    let (first, second) = if source.query().dir_text.is_empty() {
-        (existing, paths)
-    } else {
-        (paths, existing)
-    };
     let mut seen = std::collections::HashSet::new();
-    result.candidates = first
-        .into_iter()
-        .chain(second)
-        .filter(|item| seen.insert(item.target_line(input)))
-        .take(PATH_CANDIDATE_LIMIT)
+    let mut existing = std::mem::take(&mut result.candidates);
+    let reserved: Vec<_> = existing
+        .iter()
+        .filter(|item| matches!(item.kind, CandidateKind::Option | CandidateKind::Subcommand))
+        .take(3)
+        .cloned()
         .collect();
+    let mut merged = Vec::new();
+    let mut add = |item: CompletionCandidate| {
+        if let Some(target) = item.target_line(input)
+            && seen.insert(target)
+        {
+            merged.push(item);
+        }
+    };
+    for item in reserved {
+        add(item);
+    }
+    existing.truncate(6);
+    let paths = paths.into_iter().take(6);
+    if !explicit_directory {
+        for item in existing {
+            add(item);
+        }
+        for item in paths {
+            add(item);
+        }
+    } else {
+        for item in paths {
+            add(item);
+        }
+        for item in existing {
+            add(item);
+        }
+    }
+    merged.truncate(PATH_CANDIDATE_LIMIT);
+    result.candidates = merged;
     result
+}
+
+fn preserve_suggestion_selection(
+    previous: Option<&CommandSuggestionState>,
+    next: &mut CommandSuggestionState,
+) {
+    if let Some(previous) = previous
+        && previous.session_id == next.session_id
+        && previous.mode == next.mode
+        && previous.input_version == next.input_version
+        && previous.draft == next.draft
+    {
+        next.selected_index = previous
+            .selected_index
+            .and_then(|i| previous.items.get(i))
+            .and_then(|selected| {
+                next.items
+                    .iter()
+                    .position(|item| item.command == selected.command)
+            });
+    }
 }
 
 /// True when `next` is `previous` plus characters typed at the end.
@@ -697,32 +745,51 @@ impl NyaTermApp {
                     return;
                 };
                 let search_started_at = Instant::now();
-                let results = request
-                    .completion
-                    .search(CompletionQuery {
-                        fill_policy: Some(request.fill_policy),
-                        context: request.context.clone(),
-                        input: request.pattern.clone(),
-                        mode: request.mode,
-                        quick: request.quick_commands.clone(),
-                        min: request.min_chars,
-                        max: request.max_chars,
-                    })
-                    .await;
-                let results = match request.path_source.as_ref() {
-                    Some(source) => {
-                        let executor = cx.background_executor().clone();
-                        let paths = source
-                            .candidates(&request.pattern, |delay| executor.timer(delay))
-                            .await;
-                        merge_path_candidates(results, paths, source, &request.pattern)
-                    }
-                    None => results,
-                };
-                let search_duration = search_started_at.elapsed();
-                let _ = this.update(cx, |this, cx| {
-                    this.publish_command_suggestion_search(request, results, search_duration, cx);
+                let path_task = request.path_source.clone().map(|source| {
+                    let input = request.pattern.clone();
+                    cx.background_executor()
+                        .spawn(async move { source.candidates(&input).await })
                 });
+                let completion = request.completion.clone();
+                let ordinary = completion.search(CompletionQuery {
+                    fill_policy: Some(request.fill_policy),
+                    context: request.context.clone(),
+                    input: request.pattern.clone(),
+                    mode: request.mode,
+                    quick: request.quick_commands.clone(),
+                    min: request.min_chars,
+                    max: request.max_chars,
+                });
+                let paths = async move {
+                    match path_task {
+                        Some(task) => task.await,
+                        None => Vec::new(),
+                    }
+                };
+                progressive::publish_progressively(ordinary, paths, |result, paths| {
+                    let mut publication = request.clone();
+                    let result = match (paths, publication.path_source.as_ref()) {
+                        (Some(paths), Some(source)) => merge_path_candidates(
+                            result,
+                            paths,
+                            !source.query().dir_text.is_empty(),
+                            &publication.pattern,
+                        ),
+                        _ => {
+                            publication.path_source = None;
+                            result
+                        }
+                    };
+                    let _ = this.update(cx, |this, cx| {
+                        this.publish_command_suggestion_search(
+                            publication,
+                            result,
+                            search_started_at.elapsed(),
+                            cx,
+                        );
+                    });
+                })
+                .await;
             }));
     }
 
@@ -947,7 +1014,14 @@ impl NyaTermApp {
         search_duration: Duration,
         cx: &mut Context<Self>,
     ) {
-        if self.commands.completion_runtime().revision() != result.revision
+        if request.path_source.as_ref().is_some_and(|source| {
+            self.terminal
+                .editing
+                .sessions
+                .get(&request.session_id)
+                .and_then(|state| state.file_context.current())
+                .is_none_or(|context| context.cache_key() != source.context())
+        }) || self.commands.completion_runtime().revision() != result.revision
             || self.command_suggestion_context(&request.session_id).scope != request.context.scope
             || self.terminal.assist.command_suggestion_search_gen != request.request_id
             || self.session.active_id() != Some(request.session_id.as_str())
@@ -984,6 +1058,7 @@ impl NyaTermApp {
             })
             .collect();
         let completion_revision = result.revision;
+        let incremental = request.path_source.is_some();
         let scope = Some(request.context.scope.clone());
         let mode = request.mode;
         let CommandSuggestionSearchRequest {
@@ -1014,7 +1089,7 @@ impl NyaTermApp {
             return;
         }
         let update_started_at = Instant::now();
-        let next_state = CommandSuggestionState {
+        let mut next_state = CommandSuggestionState {
             refreshing: false,
             mode,
             completion_revision,
@@ -1029,6 +1104,12 @@ impl NyaTermApp {
                 .collect(),
             selected_index: None,
         };
+        if incremental {
+            preserve_suggestion_selection(
+                self.terminal.assist.command_suggestions.as_ref(),
+                &mut next_state,
+            );
+        }
         if !command_suggestion_state_changed(
             self.terminal.assist.command_suggestions.as_ref(),
             &next_state,
@@ -3363,6 +3444,25 @@ mod tests {
             }],
             selected_index: Some(0),
         }
+    }
+
+    #[test]
+    fn incremental_selection_follows_the_command_and_never_a_reused_row_index() {
+        let previous = open_suggestions_popup("s1");
+        let mut next = open_suggestions_popup("s1");
+        let mut added = next.items[0].clone();
+        added.command = "new-path".into();
+        next.items.insert(0, added);
+        next.selected_index = None;
+        super::preserve_suggestion_selection(Some(&previous), &mut next);
+        assert_eq!(next.selected_index, Some(1));
+        next.items.pop();
+        super::preserve_suggestion_selection(Some(&previous), &mut next);
+        assert_eq!(next.selected_index, None);
+        next.input_version += 1;
+        next.items = previous.items.clone();
+        super::preserve_suggestion_selection(Some(&previous), &mut next);
+        assert_eq!(next.selected_index, None);
     }
 
     #[test]

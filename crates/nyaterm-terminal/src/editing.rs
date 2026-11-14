@@ -221,16 +221,8 @@ pub fn resolve_input(
             0
         };
         let cells = &snapshot.row(row)?.cells;
-        // A shell's right prompt (zsh RPROMPT, powerlevel10k) lives on the input
-        // row, separated by a gap and pinned to the margin; it is not a leftover.
-        let end = if row + 1 == range.end {
-            right_prompt_start(cells, start, snapshot.cols).unwrap_or(cells.len())
-        } else {
-            cells.len()
-        };
         if cells
             .iter()
-            .take(end)
             .skip(start)
             .any(|cell| cell.width > 0 && !cell.text.chars().all(|ch| ch == ' '))
         {
@@ -249,41 +241,6 @@ pub fn resolve_input(
     }
     (mapping.cursor_at(cursor) == Some((snapshot.cursor.row, snapshot.cursor.col)))
         .then_some(mapping)
-}
-
-/// Cells a right-aligned prompt must be separated from the input by.
-const RIGHT_PROMPT_MIN_GAP: usize = 3;
-/// zsh keeps the last column free, and some themes indent by one more.
-const RIGHT_PROMPT_MARGIN: usize = 3;
-
-/// Column where a right prompt begins at or after `from`, if the row has one.
-///
-/// It is the first visible cell after a gap of at least `RIGHT_PROMPT_MIN_GAP`
-/// blank cells, and the row's last visible cell must sit within
-/// `RIGHT_PROMPT_MARGIN` of the right edge. Text adjacent to the input, as a
-/// half-erased old suffix would be, never qualifies.
-fn right_prompt_start(cells: &[crate::RenderCell], from: usize, cols: usize) -> Option<usize> {
-    let visible = |cell: &crate::RenderCell| cell.width > 0 && !cell.text.trim().is_empty();
-    let last = cells.iter().rposition(visible)?;
-    if last + RIGHT_PROMPT_MARGIN < cols {
-        return None;
-    }
-    let mut blanks = 0;
-    let mut start = None;
-    for (col, cell) in cells.iter().enumerate().take(last + 1).skip(from) {
-        if cell.width == 0 {
-            continue;
-        }
-        if visible(cell) {
-            if blanks >= RIGHT_PROMPT_MIN_GAP {
-                start = Some(col);
-            }
-            blanks = 0;
-        } else {
-            blanks += 1;
-        }
-    }
-    start
 }
 
 /// Recovery is restricted to an explicit active input boundary. The terminal does
@@ -309,9 +266,8 @@ pub fn recover_marked_input(
         let col_end = if row + 1 < range.end {
             snapshot.cols
         } else {
-            let visible_end = right_prompt_start(&row_data.cells, col_start, snapshot.cols)
-                .unwrap_or(row_data.cells.len());
-            row_data.cells[..visible_end]
+            row_data
+                .cells
                 .iter()
                 .rposition(|cell| cell.width > 0 && !cell.text.trim().is_empty())
                 .map_or(0, |col| col + usize::from(row_data.cells[col].width))
@@ -387,21 +343,20 @@ mod tests {
     }
 
     #[test]
-    fn a_right_prompt_on_the_input_row_does_not_block_confirmation() {
+    fn an_unproven_right_prompt_cannot_confirm_the_input() {
         let screen = screen_with_right_prompt("cd /");
         let snapshot = screen.snapshot();
-        assert!(resolve_input(&snapshot, "cd /", 4).is_some());
+        assert!(resolve_input(&snapshot, "cd /", 4).is_none());
     }
 
     #[test]
-    fn marked_recovery_ignores_a_right_prompt() {
+    fn marked_recovery_does_not_discard_an_ambiguous_right_suffix() {
         let mut screen = TerminalScreen::new(80, 24);
         screen.advance(b"$ \x1b]133;B\x07");
         screen.advance(b"\x1b[1;73H12:00 \xe2\x94\x80\xe2\x95\xaf\x1b[1;3H");
         screen.advance(b"cd /");
         let snapshot = screen.snapshot();
-        let (value, cursor) = recover_marked_input(&snapshot, 4096).unwrap();
-        assert_eq!((value.as_str(), cursor), ("cd /", 4));
+        assert!(recover_marked_input(&snapshot, 4096).is_none());
     }
 
     #[test]
@@ -420,6 +375,24 @@ mod tests {
         screen.advance(b"\x1b[1;7H");
         let snapshot = screen.snapshot();
         assert!(resolve_input(&snapshot, "cd /", 4).is_none());
+    }
+
+    #[test]
+    fn old_text_near_the_right_margin_is_not_confirmation() {
+        for marked in [false, true] {
+            for suffix in ["old", "界x"] {
+                let mut screen = TerminalScreen::new(40, 4);
+                screen.advance(b"$ ");
+                if marked {
+                    screen.advance(b"\x1b]133;B\x07");
+                }
+                screen.advance(format!("abc\x1b[1;37H{suffix}\x1b[1;6H").as_bytes());
+                assert!(resolve_input(&screen.snapshot(), "abc", 3).is_none());
+                assert!(recover_marked_input(&screen.snapshot(), 4096).is_none());
+                screen.advance(b"\x1b[K");
+                assert!(resolve_input(&screen.snapshot(), "abc", 3).is_some());
+            }
+        }
     }
 
     #[test]
@@ -536,5 +509,45 @@ mod tests {
         assert!(resolve_input(&screen.snapshot(), "aaa", 3).is_none());
         screen.advance(b"\r\nnext");
         assert!(resolve_input(&screen.snapshot(), "aaaa", 4).is_none());
+    }
+}
+
+#[cfg(test)]
+mod file_context_tests {
+    use crate::TerminalScreen;
+    const MARK: &str = "\x1b]7777;NyaTermFileContext;1;0123456789abcdef0123456789abcdef;123;1000;1;L2hvbWUvdXNlcg==;L3RtcA==\x07";
+    #[test]
+    fn context_follows_prompt_boundaries_even_across_single_byte_chunks() {
+        for split in [false, true] {
+            let mut screen = TerminalScreen::new(80, 24);
+            let bytes = format!("\x1b]133;A\x07{MARK}$ \x1b]133;B\x07cd /");
+            if split {
+                for byte in bytes.bytes() {
+                    screen.advance(&[byte]);
+                }
+            } else {
+                screen.advance(bytes.as_bytes());
+            }
+            let snapshot = screen.snapshot();
+            assert!(snapshot.shell_input_anchor.is_some());
+            assert_eq!(snapshot.file_context.as_ref().unwrap().cwd, "/tmp");
+            screen.advance(b"\x1b]133;C\x07");
+            assert!(screen.snapshot().file_context.is_none());
+            screen.advance(MARK.as_bytes());
+            screen.advance(b"\x1b]133;A\x07");
+            assert!(screen.snapshot().file_context.is_none());
+        }
+    }
+    #[test]
+    fn malformed_and_oversized_markers_invalidate_previous_context() {
+        let mut screen = TerminalScreen::new(80, 24);
+        screen.advance(MARK.as_bytes());
+        assert!(screen.snapshot().file_context.is_some());
+        screen.advance(b"\x1b]7777;NyaTermFileContext;99;bad\x07");
+        assert!(screen.snapshot().file_context.is_none());
+        screen.advance(MARK.as_bytes());
+        screen
+            .advance(format!("\x1b]7777;NyaTermFileContext;1;{}\x07", "x".repeat(5000)).as_bytes());
+        assert!(screen.snapshot().file_context.is_none());
     }
 }

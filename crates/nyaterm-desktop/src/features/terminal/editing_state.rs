@@ -45,60 +45,7 @@ pub(super) struct SessionEditingState {
     pub(super) awaiting_snapshot: bool,
     /// Survives `clear_active`: a password prompt or alternate screen inside
     /// the nested shell must not make the outer host's files look current.
-    pub(super) foreign_shells: ForeignShells,
-}
-
-/// Interactive shells this session opened on another host, container or
-/// distro (`ssh`, `docker exec -it`, ...). Path suggestions list the session's
-/// own file system, which is the wrong one while this is non-zero.
-#[derive(Default)]
-pub(super) struct ForeignShells {
-    depth: u8,
-    /// Prompt prefix of the outermost shell, to notice a return without `exit`
-    /// (a failed `ssh` never opens a shell, yet nothing else announces it).
-    outer_prompt: Option<String>,
-}
-
-impl ForeignShells {
-    /// A bound keeps a runaway chain from overflowing; real nesting is shallow.
-    const MAX_DEPTH: u8 = 8;
-
-    pub(super) fn is_active(&self) -> bool {
-        self.depth > 0
-    }
-
-    pub(super) fn enter(&mut self, count: usize, outer_prompt: Option<&str>) {
-        if count == 0 {
-            return;
-        }
-        if self.depth == 0 {
-            self.outer_prompt = outer_prompt
-                .filter(|prompt| !prompt.trim().is_empty())
-                .map(str::to_owned);
-        }
-        let added = u8::try_from(count).unwrap_or(u8::MAX);
-        self.depth = self.depth.saturating_add(added).min(Self::MAX_DEPTH);
-    }
-
-    /// `exit`, `logout`, or Ctrl+D on an empty line.
-    pub(super) fn leave(&mut self) {
-        self.depth = self.depth.saturating_sub(1);
-        if self.depth == 0 {
-            self.outer_prompt = None;
-        }
-    }
-
-    pub(super) fn reset(&mut self) {
-        *self = Self::default();
-    }
-
-    /// The outermost shell's prompt is back on screen: the nested shell ended
-    /// or never started. Prompts that differ keep the guard on.
-    pub(super) fn note_prompt(&mut self, prompt: &str) {
-        if self.depth > 0 && self.outer_prompt.as_deref() == Some(prompt) {
-            self.reset();
-        }
-    }
+    pub(super) file_context: super::file_context::FileContextState,
 }
 
 /// This is a fill acknowledgement, never permission to synthesize Enter.
@@ -306,14 +253,14 @@ impl TerminalEditingState {
         // cannot prove that the foreground program returned to the shell.
         let command_navigation = std::mem::take(&mut self.state_mut().command_navigation);
         let awaiting_snapshot = self.state_mut().awaiting_snapshot;
-        let foreign_shells = std::mem::take(&mut self.state_mut().foreign_shells);
+        let file_context = std::mem::take(&mut self.state_mut().file_context);
         let version = self.state_mut().model.version.wrapping_add(1);
         let mut model = ShellEditState::default();
         model.version = version;
         *self.state_mut() = SessionEditingState {
             command_navigation,
             awaiting_snapshot,
-            foreign_shells,
+            file_context,
             model,
             ..SessionEditingState::default()
         };
@@ -347,6 +294,34 @@ mod tests {
     use super::{SuggestionFillRequest, TerminalEditingState};
     use nyaterm_core::terminal::editing::{EDIT_CONFIRMATION_TIMEOUT, EditCapability, EditPhase};
     use std::time::Instant;
+
+    #[test]
+    fn clearing_editing_keeps_the_original_shell_and_submission_guard() {
+        use nyaterm_core::terminal::file_context::ShellFileContext;
+        let mut editing = TerminalEditingState::default();
+        editing.activate("session");
+        let mut context = ShellFileContext {
+            binding: "0123456789abcdef0123456789abcdef".into(),
+            instance: 42,
+            user: 1000,
+            sequence: 1,
+            home: "/home/test".into(),
+            cwd: "/tmp".into(),
+        };
+        editing.state_mut().file_context.observe(Some(&context));
+        editing.state_mut().file_context.note_input(b"sudo -i\r");
+        editing.clear_active();
+        editing.state_mut().file_context.observe(Some(&context));
+        assert!(editing.state().unwrap().file_context.current().is_none());
+        let mut inner = context.clone();
+        inner.user = 0;
+        inner.sequence += 1;
+        editing.state_mut().file_context.observe(Some(&inner));
+        assert!(editing.state().unwrap().file_context.current().is_none());
+        context.sequence += 1;
+        editing.state_mut().file_context.observe(Some(&context));
+        assert!(editing.state().unwrap().file_context.current().is_some());
+    }
 
     #[test]
     fn history_navigation_suppression_survives_cursor_moves_and_session_switches() {
@@ -450,74 +425,5 @@ mod tests {
         editing.activate("two");
         editing.activate("one");
         assert_ne!(editing.allocate_confirmation_id(), first_id);
-    }
-}
-
-#[cfg(test)]
-mod foreign_shell_tests {
-    use super::{ForeignShells, TerminalEditingState};
-
-    #[test]
-    fn depth_follows_enter_and_leave_and_never_underflows() {
-        let mut shells = ForeignShells::default();
-        assert!(!shells.is_active());
-        shells.leave();
-        assert!(!shells.is_active());
-        shells.enter(0, None);
-        assert!(!shells.is_active());
-        shells.enter(1, Some("$ "));
-        shells.enter(1, Some("root@box# "));
-        shells.leave();
-        assert!(shells.is_active());
-        shells.leave();
-        assert!(!shells.is_active());
-    }
-
-    #[test]
-    fn nesting_is_bounded() {
-        let mut shells = ForeignShells::default();
-        shells.enter(usize::MAX, None);
-        for _ in 0..ForeignShells::MAX_DEPTH {
-            assert!(shells.is_active());
-            shells.leave();
-        }
-        assert!(!shells.is_active());
-    }
-
-    #[test]
-    fn the_outer_prompt_returning_ends_the_guard_but_other_prompts_do_not() {
-        let mut shells = ForeignShells::default();
-        shells.enter(1, Some("[me@mac ~]$ "));
-        shells.note_prompt("root@box:/# ");
-        assert!(shells.is_active());
-        shells.note_prompt("[me@mac ~]$ ");
-        assert!(!shells.is_active());
-    }
-
-    #[test]
-    fn without_a_known_outer_prompt_only_exit_ends_the_guard() {
-        let mut shells = ForeignShells::default();
-        shells.enter(1, None);
-        shells.note_prompt("anything");
-        assert!(shells.is_active());
-        let mut blank = ForeignShells::default();
-        blank.enter(1, Some("   "));
-        blank.note_prompt("   ");
-        assert!(blank.is_active());
-    }
-
-    #[test]
-    fn losing_editing_authority_does_not_forget_the_nested_shell() {
-        let mut editing = TerminalEditingState::default();
-        editing.activate("s1");
-        editing.state_mut().foreign_shells.enter(2, Some("$ "));
-        // A password prompt or alternate screen inside the nested shell.
-        editing.clear_active();
-        assert!(editing.state().unwrap().foreign_shells.is_active());
-        editing.state_mut().foreign_shells.leave();
-        editing.clear_active();
-        assert!(editing.state().unwrap().foreign_shells.is_active());
-        editing.state_mut().foreign_shells.leave();
-        assert!(!editing.state().unwrap().foreign_shells.is_active());
     }
 }

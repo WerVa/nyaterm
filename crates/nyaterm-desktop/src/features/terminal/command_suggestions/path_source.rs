@@ -1,248 +1,289 @@
-//! Path candidates for the suggestion popup. Listing is blocking SFTP/local
-//! I/O, so it runs on the blocking-job pool with a hard timeout and a short
-//! cache; the UI thread only builds the request and publishes the result.
+//! Per-application bounded path queries; no filesystem work runs in GPUI updates.
 use crate::blocking_jobs::BlockingJobScheduler;
 use crate::features::NyaTermApp;
+use crate::features::session::remote_files::FileAccessPurpose;
+use futures::{
+    FutureExt,
+    channel::oneshot,
+    future::{BoxFuture, Shared},
+};
 use nyaterm_core::completion::matching::TextMatcher;
 use nyaterm_core::completion::path::{
     MAX_LISTED_ENTRIES, PathEntry, PathQuery, path_candidates, path_query_for_input,
     resolve_directory,
 };
 use nyaterm_core::completion::types::{CompletionCandidate, CompletionScope, ShellDialect};
+use nyaterm_files::file_browser::lightweight::DirectoryLimits;
 use nyaterm_files::file_browser::{FileBrowserBackendKind, FileBrowserService};
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, OnceLock};
+use nyaterm_files::sftp::{SftpFileType, SftpTransferControl};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Directory listings are reused while typing a path segment by segment.
 const LISTING_TTL: Duration = Duration::from_secs(2);
-/// A job that never reported back (panic, cancelled before it ran) must not
-/// block its directory forever.
-const IN_FLIGHT_STALE: Duration = Duration::from_secs(10);
-/// The first listing of a session may have to open the SFTP channel, which
-/// costs about as much as the SSH login itself; later ones reuse it.
-const COLD_LISTING_BUDGET: Duration = Duration::from_millis(2500);
-const WARM_LISTING_BUDGET: Duration = Duration::from_millis(500);
-const POLL_INTERVAL: Duration = Duration::from_millis(30);
+const FAILURE_TTL: Duration = Duration::from_millis(500);
+const LISTING_BUDGET: Duration = Duration::from_millis(2500);
+const MAX_NAME_BYTES: usize = 4 * 1024 * 1024;
+const MAX_CACHE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CACHED_LISTINGS: usize = 48;
 pub(super) const PATH_CANDIDATE_LIMIT: usize = 12;
-
-type CacheKey = (String, Option<String>, String);
 type Listing = Arc<Vec<PathEntry>>;
-
-struct Shared {
-    listings: HashMap<CacheKey, (Instant, Listing)>,
-    in_flight: HashMap<CacheKey, Instant>,
-    /// Sessions that completed one listing, so their channel is open.
-    warm_sessions: HashSet<String>,
+type Answer = Shared<BoxFuture<'static, Option<Listing>>>;
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct CacheKey {
+    session: String,
+    context: String,
+    directory: String,
+}
+struct Running {
+    id: u64,
+    key: CacheKey,
+    control: SftpTransferControl,
+    answer: Answer,
+}
+#[derive(Default)]
+struct State {
+    listings: HashMap<CacheKey, (Instant, Option<Listing>)>,
+    running: HashMap<String, Running>,
+    epochs: HashMap<String, Arc<()>>,
+    next_id: u64,
 }
 
-fn shared() -> &'static Mutex<Shared> {
-    static SHARED: OnceLock<Mutex<Shared>> = OnceLock::new();
-    SHARED.get_or_init(|| {
-        Mutex::new(Shared {
-            listings: HashMap::new(),
-            in_flight: HashMap::new(),
-            warm_sessions: HashSet::new(),
-        })
-    })
+#[derive(Default)]
+pub(in crate::features::terminal) struct PathCompletionRuntime {
+    state: Arc<Mutex<State>>,
+    jobs: Option<BlockingJobScheduler>,
 }
-
-fn lock() -> std::sync::MutexGuard<'static, Shared> {
-    shared().lock().unwrap_or_else(|e| e.into_inner())
+impl PathCompletionRuntime {
+    pub(in crate::features::terminal) fn cancel_session(&self, session: &str) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(job) = state.running.get(session) {
+            job.control.cancel();
+        }
+        state.listings.retain(|key, _| key.session != session);
+        state.epochs.remove(session);
+    }
+    pub(in crate::features::terminal) fn begin_shutdown(
+        &mut self,
+    ) -> Option<impl FnOnce() + Send + 'static + use<>> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.epochs.clear();
+        for job in state.running.values() {
+            job.control.cancel();
+        }
+        drop(state);
+        self.jobs.take().map(|jobs| jobs.begin_shutdown())
+    }
 }
-
-fn cached(key: &CacheKey) -> Option<Listing> {
-    lock()
-        .listings
-        .get(key)
-        .filter(|(at, _)| at.elapsed() < LISTING_TTL)
-        .map(|(_, listing)| listing.clone())
-}
-
-fn is_running(key: &CacheKey) -> bool {
-    lock()
-        .in_flight
-        .get(key)
-        .is_some_and(|started| started.elapsed() < IN_FLIGHT_STALE)
-}
-
-/// Leaves `in_flight` even when the job panics or unwinds, so a failed listing
-/// cannot make every later keystroke in that directory wait out the budget.
-struct InFlightGuard(CacheKey);
-
-impl Drop for InFlightGuard {
+impl Drop for PathCompletionRuntime {
     fn drop(&mut self) {
-        lock().in_flight.remove(&self.0);
+        if let Some(cleanup) = self.begin_shutdown() {
+            let _ = nyaterm_core::runtime::worker::spawn("path-completion-cleanup".into(), cleanup);
+        }
     }
 }
 
-/// Called by the listing job itself, so a result that arrives after the
-/// popup stopped waiting still serves the next keystroke.
-fn finish(key: CacheKey, listing: Option<Listing>) {
-    let mut shared = lock();
-    shared.in_flight.remove(&key);
-    let Some(listing) = listing else { return };
-    shared.warm_sessions.insert(key.0.clone());
-    shared
-        .listings
-        .retain(|_, (at, _)| at.elapsed() < LISTING_TTL);
-    if shared.listings.len() >= MAX_CACHED_LISTINGS {
-        shared.listings.clear();
+struct Claim {
+    state: Arc<Mutex<State>>,
+    key: CacheKey,
+    id: u64,
+    response: Option<oneshot::Sender<Option<Listing>>>,
+    control: SftpTransferControl,
+}
+impl Claim {
+    fn finish(&mut self, listing: Option<Listing>) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state
+            .running
+            .get(&self.key.session)
+            .is_some_and(|job| job.id == self.id)
+        {
+            state.running.remove(&self.key.session);
+            if !self.control.is_cancelled() {
+                state.listings.retain(|_, (at, value)| {
+                    at.elapsed()
+                        < if value.is_some() {
+                            LISTING_TTL
+                        } else {
+                            FAILURE_TTL
+                        }
+                });
+                let bytes = |value: &Option<Listing>| {
+                    value
+                        .as_ref()
+                        .map_or(0, |items| items.iter().map(|e| e.name.len()).sum::<usize>())
+                };
+                while state.listings.len() >= MAX_CACHED_LISTINGS
+                    || state
+                        .listings
+                        .values()
+                        .map(|(_, value)| bytes(value))
+                        .sum::<usize>()
+                        + bytes(&listing)
+                        > MAX_CACHE_BYTES
+                {
+                    let Some(oldest) = state
+                        .listings
+                        .iter()
+                        .min_by_key(|(_, (at, _))| *at)
+                        .map(|(key, _)| key.clone())
+                    else {
+                        break;
+                    };
+                    state.listings.remove(&oldest);
+                }
+                state
+                    .listings
+                    .insert(self.key.clone(), (Instant::now(), listing.clone()));
+            }
+        }
+        drop(state);
+        if let Some(sender) = self.response.take() {
+            let _ = sender.send(if self.control.is_cancelled() {
+                None
+            } else {
+                listing
+            });
+        }
     }
-    shared.listings.insert(key, (Instant::now(), listing));
+}
+impl Drop for Claim {
+    fn drop(&mut self) {
+        if self.response.is_some() {
+            self.finish(None);
+        }
+    }
 }
 
-/// Everything the background task needs; contains no GPUI handles.
 #[derive(Clone)]
 pub(super) struct PathSource {
     service: FileBrowserService,
     query: PathQuery,
-    session_id: String,
-    cwd: Option<String>,
+    key: CacheKey,
+    state: Arc<Mutex<State>>,
     jobs: BlockingJobScheduler,
+    epoch: Arc<()>,
 }
-
 impl PathSource {
     pub(super) fn query(&self) -> &PathQuery {
         &self.query
     }
-
-    fn start_listing(&self, key: CacheKey) -> bool {
-        {
-            let mut shared = lock();
-            let running = shared
-                .in_flight
-                .get(&key)
-                .is_some_and(|started| started.elapsed() < IN_FLIGHT_STALE);
-            if running {
-                return true;
-            }
-            shared.in_flight.insert(key.clone(), Instant::now());
-        }
-        let service = self.service.clone();
-        let query = self.query.clone();
-        let cwd = self.cwd.clone();
-        let started = Instant::now();
-        let job_key = key.clone();
-        let task = self.jobs.submit_task("path-completion", move |_| {
-            let _guard = InFlightGuard(job_key.clone());
-            let home = query
-                .dir_text
-                .starts_with('~')
-                .then(|| service.home_dir().ok())
-                .flatten();
-            let listing = resolve_directory(&query, cwd.as_deref(), home.as_deref())
-                .and_then(|dir| match service.list_dir(&dir) {
-                    Ok(entries) => Some(entries),
-                    // The error text can embed the listed path, so it is not logged.
-                    Err(_) => {
-                        tracing::info!("path completion listing failed");
-                        None
-                    }
-                })
-                .map(|entries| {
-                    Arc::new(
-                        entries
-                            .into_iter()
-                            .take(MAX_LISTED_ENTRIES)
-                            .map(|entry| PathEntry {
-                                is_dir: entry.is_directory(),
-                                size: entry.size,
-                                name: entry.name,
-                            })
-                            .collect::<Vec<_>>(),
-                    )
-                });
-            tracing::debug!(
-                entries = listing.as_ref().map(|l| l.len()),
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                "path completion listing finished"
-            );
-            finish(job_key, listing);
-        });
-        if task.is_err() {
-            lock().in_flight.remove(&key);
-            return false;
-        }
-        // The pool owns the job; its result goes through `finish`.
-        drop(task);
-        true
+    pub(super) fn context(&self) -> &str {
+        &self.key.context
     }
-
-    /// Returns candidates, or an empty list on timeout/error. Completion must
-    /// never block typing, so every failure degrades to "no path suggestions".
-    pub(super) async fn candidates<F, Fut>(&self, input: &str, sleep: F) -> Vec<CompletionCandidate>
-    where
-        F: Fn(Duration) -> Fut,
-        Fut: std::future::Future<Output = ()>,
-    {
-        let key = (
-            self.session_id.clone(),
-            self.cwd.clone(),
-            self.query.dir_text.clone(),
-        );
-        let began = Instant::now();
-        let from_cache = cached(&key).is_some();
-        let listing = match cached(&key) {
-            Some(listing) => listing,
-            None => {
-                if !self.start_listing(key.clone()) {
-                    return Vec::new();
+    async fn listing(&self) -> Option<Listing> {
+        loop {
+            let (wait, retry, claim) = {
+                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                if !state
+                    .epochs
+                    .get(&self.key.session)
+                    .is_some_and(|epoch| Arc::ptr_eq(epoch, &self.epoch))
+                {
+                    return None;
                 }
-                let budget = if lock().warm_sessions.contains(&self.session_id) {
-                    WARM_LISTING_BUDGET
+                if let Some((at, result)) = state.listings.get(&self.key)
+                    && at.elapsed()
+                        < if result.is_some() {
+                            LISTING_TTL
+                        } else {
+                            FAILURE_TTL
+                        }
+                {
+                    return result.clone();
+                }
+                if let Some(running) = state.running.get(&self.key.session) {
+                    let retry = running.key != self.key || running.control.is_cancelled();
+                    if retry {
+                        running.control.cancel();
+                    }
+                    (running.answer.clone(), retry, None)
                 } else {
-                    COLD_LISTING_BUDGET
-                };
-                let started = Instant::now();
-                let listing = loop {
-                    if let Some(listing) = cached(&key) {
-                        break Some(listing);
-                    }
-                    let running = is_running(&key);
-                    if !running || started.elapsed() >= budget {
-                        // The job stores its result and leaves `in_flight` in one
-                        // step, so a finished job is visible in the cache now.
-                        break cached(&key);
-                    }
-                    sleep(POLL_INTERVAL).await;
-                };
-                match listing {
-                    Some(listing) => listing,
-                    None => {
-                        tracing::info!(
-                            waited_ms = started.elapsed().as_millis() as u64,
-                            "path completion listing not ready; it will be cached for the next keystroke"
-                        );
-                        return Vec::new();
-                    }
+                    state.next_id = state.next_id.wrapping_add(1);
+                    let id = state.next_id;
+                    let control = SftpTransferControl::default();
+                    let (sender, receiver) = oneshot::channel();
+                    let answer = receiver
+                        .map(|result| result.unwrap_or(None))
+                        .boxed()
+                        .shared();
+                    state.running.insert(
+                        self.key.session.clone(),
+                        Running {
+                            id,
+                            key: self.key.clone(),
+                            control: control.clone(),
+                            answer: answer.clone(),
+                        },
+                    );
+                    let claim = Claim {
+                        state: self.state.clone(),
+                        key: self.key.clone(),
+                        id,
+                        response: Some(sender),
+                        control,
+                    };
+                    (answer, false, Some(claim))
                 }
+            };
+            if let Some(mut claim) = claim {
+                let service = self.service.clone();
+                let directory = self.key.directory.clone();
+                // Capture the guard before enqueueing: rejected and cancelled
+                // queued closures release the claim even if never executed.
+                let _ = self.jobs.submit_task("path-completion", move |cancel| {
+                    if cancel.is_cancelled() {
+                        claim.control.cancel();
+                        return;
+                    }
+                    let listing = service
+                        .list_directory_lightweight(
+                            &directory,
+                            DirectoryLimits {
+                                entries: MAX_LISTED_ENTRIES,
+                                name_bytes: MAX_NAME_BYTES,
+                            },
+                            claim.control.clone(),
+                            Instant::now() + LISTING_BUDGET,
+                        )
+                        .ok()
+                        .map(|listing| {
+                            Arc::new(
+                                listing
+                                    .entries
+                                    .into_iter()
+                                    .map(|entry| PathEntry {
+                                        name: entry.name,
+                                        is_dir: entry.file_type == SftpFileType::Directory,
+                                        size: entry.size,
+                                    })
+                                    .collect(),
+                            )
+                        });
+                    claim.finish(listing);
+                });
             }
+            let result = wait.await;
+            if !retry {
+                return result;
+            }
+        }
+    }
+    pub(super) async fn candidates(&self, input: &str) -> Vec<CompletionCandidate> {
+        let Some(listing) = self.listing().await else {
+            return Vec::new();
         };
-        let candidates = path_candidates(
+        path_candidates(
             &self.query,
             &listing,
             input,
             &mut TextMatcher::default(),
             PATH_CANDIDATE_LIMIT,
-        );
-        tracing::debug!(
-            diagnostic = "path_completion",
-            entries = listing.len(),
-            candidates = candidates.len(),
-            from_cache = from_cache,
-            total_ms = began.elapsed().as_millis() as u64,
-            "path completion answered"
-        );
-        candidates
+        )
     }
 }
 
 impl NyaTermApp {
-    /// None when the token is not a path or the session cannot list files
-    /// (Telnet/Serial, Android, disconnected SSH). Never connects by itself:
-    /// the remote service is created lazily and shared with the file panel.
     pub(super) fn path_source_for_session(
         &mut self,
         session_id: &str,
@@ -250,173 +291,63 @@ impl NyaTermApp {
         dialect: ShellDialect,
     ) -> Option<PathSource> {
         let backend = self.session.file_browser_backend_for_session(session_id)?;
-        // Inside `ssh`, `docker exec -it` and the like the session's own file
-        // system is not the one the user is looking at.
-        if self
-            .terminal
-            .editing
-            .sessions
-            .get(session_id)
-            .is_some_and(|state| state.foreign_shells.is_active())
-        {
-            return None;
-        }
-        // Windows consoles use drive letters and backslashes, and WSL guest
-        // paths need translation, so only POSIX-style hosts are completed.
         if backend == FileBrowserBackendKind::Adb
             || (backend == FileBrowserBackendKind::Local && cfg!(windows))
             || self.session.is_disconnected(session_id)
         {
             return None;
         }
+        let context = self
+            .terminal
+            .editing
+            .sessions
+            .get(session_id)?
+            .file_context
+            .current()?
+            .clone();
         let query = path_query_for_input(input, dialect, CompletionScope::legacy())?;
-        let service = self.file_browser_service_for_session(session_id).ok()?;
+        let directory = resolve_directory(&query, Some(&context.cwd), Some(&context.home))?;
+        let service = match backend {
+            FileBrowserBackendKind::Local => FileBrowserService::local(),
+            FileBrowserBackendKind::Remote => {
+                let config = self.session.metadata(session_id)?.ssh_config.clone()?;
+                FileBrowserService::remote(
+                    self.remote_file_service_for_session(
+                        session_id,
+                        config,
+                        FileAccessPurpose::Automation,
+                    )
+                    .ok()?,
+                )
+            }
+            FileBrowserBackendKind::Adb => return None,
+        };
+        let runtime = &mut self.terminal.assist.path_completion;
+        if runtime.jobs.is_none() {
+            runtime.jobs = BlockingJobScheduler::with_limits(2, 8).ok();
+        }
+        let epoch = runtime
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .epochs
+            .entry(session_id.into())
+            .or_default()
+            .clone();
         Some(PathSource {
+            epoch,
             service,
             query,
-            session_id: session_id.to_string(),
-            cwd: self.session.cwd(session_id).map(str::to_owned),
-            jobs: self.blocking_jobs.clone(),
+            key: CacheKey {
+                session: session_id.into(),
+                context: context.cache_key(),
+                directory,
+            },
+            state: runtime.state.clone(),
+            jobs: runtime.jobs.as_ref()?.clone(),
         })
     }
 }
 
-#[cfg(all(test, unix))]
-mod tests {
-    use super::{BlockingJobScheduler, FileBrowserService, PathSource};
-    use crate::features::NyaTermApp;
-    use gpui::AppContext as _;
-    use nyaterm_core::completion::path::path_query_for_input;
-    use nyaterm_core::completion::types::{CompletionScope, ShellDialect};
-
-    fn source(input: &str, dir: &std::path::Path) -> PathSource {
-        PathSource {
-            service: FileBrowserService::local(),
-            query: path_query_for_input(input, ShellDialect::Bash, CompletionScope::legacy())
-                .unwrap(),
-            session_id: format!("test-{}", dir.display()),
-            cwd: Some(dir.to_string_lossy().into_owned()),
-            jobs: BlockingJobScheduler::new(),
-        }
-    }
-
-    #[test]
-    fn lists_the_working_directory_for_relative_paths_and_reuses_the_cache() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("projects")).unwrap();
-        std::fs::write(dir.path().join("notes.txt"), b"hi").unwrap();
-        let input = "cd pr";
-        let source = source(input, dir.path());
-        let first =
-            futures::executor::block_on(source.candidates(input, |_| std::future::ready(())));
-        assert_eq!(first.len(), 1);
-        assert_eq!(first[0].target_line(input).unwrap(), "cd projects/");
-
-        // A cached listing answers without the pool or a timer.
-        std::fs::remove_dir(dir.path().join("projects")).unwrap();
-        let again =
-            futures::executor::block_on(source.candidates(input, |_| std::future::ready(())));
-        assert_eq!(again.len(), 1);
-    }
-
-    fn submit(app: &mut NyaTermApp, cx: &mut gpui::Context<NyaTermApp>, line: &str) {
-        submit_at(app, cx, "$ ", line);
-    }
-
-    fn submit_at(
-        app: &mut NyaTermApp,
-        cx: &mut gpui::Context<NyaTermApp>,
-        prompt: &str,
-        line: &str,
-    ) {
-        app.note_shell_editing_input(line.as_bytes(), cx);
-        app.terminal
-            .seed_session_view("s1".into(), format!("{prompt}{line}"), "UTF-8");
-        app.reconcile_shell_editing("s1", cx);
-        app.note_shell_editing_input(b"\r", cx);
-    }
-
-    fn has_path_source(app: &mut NyaTermApp) -> bool {
-        app.path_source_for_session("s1", "cd /", ShellDialect::Bash)
-            .is_some()
-    }
-
-    #[test]
-    fn path_suggestions_stop_inside_a_nested_shell_and_resume_after_exit() {
-        use crate::features::test_support::app_with_visible_local_session;
-        use crate::test_support::{TestAppCleanup, TestConfigDir};
-
-        let dir = TestConfigDir::new("nyaterm-path-nested-shell");
-        let mut cx = gpui::TestAppContext::single();
-        let _cleanup = TestAppCleanup::new(&cx);
-        let app = app_with_visible_local_session(&mut cx, dir.path(), "s1");
-        cx.update_entity(&app, |app, cx| {
-            assert!(has_path_source(app), "the local shell is the baseline");
-
-            // Same-host switches and commands that return on their own keep it.
-            submit(app, cx, "sudo -i");
-            submit(app, cx, "ssh host uptime");
-            assert!(has_path_source(app));
-
-            submit(app, cx, "ssh host");
-            assert!(!has_path_source(app));
-            submit_at(app, cx, "root@box:~# ", "docker exec -it web bash");
-            assert!(!has_path_source(app));
-
-            submit_at(app, cx, "root@web:/# ", "exit");
-            assert!(!has_path_source(app), "one shell is still nested");
-            submit_at(app, cx, "root@box:~# ", "exit");
-            assert!(has_path_source(app));
-        });
-    }
-
-    #[test]
-    fn seeing_the_outer_prompt_again_ends_the_guard_after_a_failed_ssh() {
-        use crate::features::test_support::app_with_visible_local_session;
-        use crate::test_support::{TestAppCleanup, TestConfigDir};
-
-        let dir = TestConfigDir::new("nyaterm-path-failed-ssh");
-        let mut cx = gpui::TestAppContext::single();
-        let _cleanup = TestAppCleanup::new(&cx);
-        let app = app_with_visible_local_session(&mut cx, dir.path(), "s1");
-        cx.update_entity(&app, |app, cx| {
-            // The prompt is learned from the first confirmed echo.
-            submit_at(app, cx, "$ ", "ls");
-            submit_at(app, cx, "$ ", "ssh unreachable");
-            assert!(!has_path_source(app));
-            // `ssh` failed and the same prompt came back for the next command.
-            submit_at(app, cx, "$ ", "ls");
-            assert!(has_path_source(app));
-        });
-    }
-
-    #[test]
-    fn a_missing_directory_degrades_to_no_candidates() {
-        let dir = tempfile::tempdir().unwrap();
-        let input = "ls /definitely/not/here/x";
-        let source = source(input, dir.path());
-        assert!(
-            futures::executor::block_on(source.candidates(input, |_| std::future::ready(())))
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn a_job_that_never_reported_does_not_block_its_directory_for_ever() {
-        let key: super::CacheKey = ("stale-test".into(), None, "/x/".into());
-        super::lock()
-            .in_flight
-            .insert(key.clone(), std::time::Instant::now());
-        assert!(super::is_running(&key));
-        {
-            let _guard = super::InFlightGuard(key.clone());
-        }
-        assert!(!super::is_running(&key), "guard clears the claim on drop");
-        super::lock().in_flight.insert(
-            key.clone(),
-            std::time::Instant::now() - super::IN_FLIGHT_STALE - std::time::Duration::from_secs(1),
-        );
-        assert!(!super::is_running(&key), "an old claim is ignored");
-        super::lock().in_flight.remove(&key);
-    }
-}
+#[cfg(test)]
+mod tests;
