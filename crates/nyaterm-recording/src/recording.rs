@@ -940,6 +940,12 @@ impl SessionCaptureState {
             return;
         }
         self.disconnected = true;
+        if let Some(recording) = self.recording.as_mut()
+            && let Err(error) = recording.write_raw(self.file_context_filter.flush_prefix())
+        {
+            self.mark_failed(error.to_string());
+        }
+        self.file_context_filter = Default::default();
         self.commit_partial_input();
         self.release_pending_output_lines();
         self.pending_input_escape = None;
@@ -958,6 +964,8 @@ impl SessionCaptureState {
     }
 
     fn absorb_early_state(&mut self, mut early: Self) {
+        // Reconnect can rekey between any two bytes of the new stream.
+        self.file_context_filter = std::mem::take(&mut early.file_context_filter);
         early.commit_partial_input();
         early.release_pending_output_lines();
         if let Some(recording) = self.recording.as_mut()
@@ -2564,9 +2572,12 @@ mod tests {
             .start_with_profile("s1", context, profile, Some(path.clone()))
             .unwrap();
         manager.write_raw_output("s1", b"before\n");
+        manager.write_raw_output("s1", b"\x1b]7777;NyaTermFileContext;unfinished");
         manager.disconnect_session("s1");
         manager.write_raw_output("s2", b"\x1b[32mearly\x1b[0m\n");
+        manager.write_raw_output("s2", b"\x1b]7777;NyaTermFile");
         manager.rekey_session("s1", "s2");
+        manager.write_raw_output("s2", b"Context;1;private-context\x07");
         manager.write_raw_output("s2", b"after\n");
         manager.stop("s2").unwrap();
         assert_eq!(
