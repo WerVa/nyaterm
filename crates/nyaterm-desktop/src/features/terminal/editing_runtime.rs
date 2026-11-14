@@ -527,6 +527,43 @@ mod tests {
     use crate::features::test_support::app_with_visible_local_session;
     use crate::models::{TerminalBufferCellPos, TerminalSelection};
     use crate::test_support::TestConfigDir;
+
+    #[test]
+    fn a_background_disconnect_allows_a_fresh_binding_on_reconnect() {
+        use nyaterm_core::terminal::file_context::ShellFileContext;
+        let dir = TestConfigDir::new("nyaterm-background-file-context");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, dir.path(), "active");
+        cx.update_entity(&app, |app, cx| {
+            let mut context = ShellFileContext {
+                binding: "0123456789abcdef0123456789abcdef".into(),
+                instance: 123,
+                user: 1000,
+                sequence: 1,
+                home: "/home/test".into(),
+                cwd: "/tmp".into(),
+            };
+            app.terminal.editing.activate("background");
+            app.terminal
+                .editing
+                .state_mut()
+                .file_context
+                .observe(Some(&context));
+            app.terminal
+                .editing
+                .state_mut()
+                .file_context
+                .note_input(b"sudo -i\r");
+            app.terminal.editing.activate("active");
+            app.mark_session_disconnected("background", cx);
+            context.binding = "abcdef0123456789abcdef0123456789".into();
+            let state = app.terminal.editing.sessions.get_mut("background").unwrap();
+            assert!(state.file_context.current().is_none());
+            state.file_context.observe(Some(&context));
+            assert_eq!(state.file_context.current(), Some(&context));
+        });
+    }
     use nyaterm_terminal::selection::{TerminalCellSide, TerminalSelectionEndpoint};
 
     struct InputHost;
